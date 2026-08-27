@@ -45,11 +45,12 @@ struct RootView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                Theme.bg.ignoresSafeArea()
+                (route == .scan ? Color.black : Theme.bg)
+                    .ignoresSafeArea()
 
                 page
                     .frame(width: geo.size.width, height: geo.size.height)
-                    .background(Theme.bg)
+                    .background(route == .scan ? Color.black : Theme.bg)
                     .clipShape(RoundedRectangle(cornerRadius: openness > 0 ? 32 : 0, style: .continuous))
                     .shadow(color: .black.opacity(0.18 * openness), radius: 24, x: -6, y: 0)
                     .scaleEffect(1 - 0.06 * openness, anchor: .center)
@@ -65,6 +66,7 @@ struct RootView: View {
 
                 DrawerView(route: $route, open: $drawerOpen)
                     .frame(width: drawerWidth)
+                    .frame(maxHeight: .infinity)
                     .environmentObject(store)
                     .offset(x: -drawerWidth * (1 - openness))
                     .overlay(alignment: .trailing) {
@@ -78,8 +80,9 @@ struct RootView: View {
             }
             .gesture(edgeDrag)
         }
+        .ignoresSafeArea()
         .environmentObject(store)
-        .preferredColorScheme(nil)
+        .preferredColorScheme(route == .scan ? .dark : nil)
         .task {
             Speaker.shared.configureAudioSession()
             camera.reconfigure(catalog: store.catalog, config: store.settings.engineConfig())
@@ -250,10 +253,11 @@ struct DrawerView: View {
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 22)
+            .padding(.bottom, 12)
         }
+        .safeAreaPadding(.top, 8)
+        .safeAreaPadding(.bottom, 12)
         .frame(maxHeight: .infinity, alignment: .top)
-        .padding(.top, 54)
         .background(Theme.bg.ignoresSafeArea())
     }
 

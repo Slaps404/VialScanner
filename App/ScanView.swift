@@ -38,7 +38,8 @@ struct ScanView: View {
                 bottomStack
             }
             .padding(.horizontal, 16)
-            .padding(.bottom, 10)
+            .safeAreaPadding(.top, 4)
+            .safeAreaPadding(.bottom, 10)
         }
         .background(Color.black.ignoresSafeArea())
         .onAppear {

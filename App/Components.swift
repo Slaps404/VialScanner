@@ -292,6 +292,7 @@ struct Screen<Content: View>: View {
 
             content
         }
+        .safeAreaPadding(.top, 4)
         .background(Theme.bg.ignoresSafeArea())
     }
 }
