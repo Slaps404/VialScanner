@@ -1,6 +1,6 @@
 //
-//  VyalsApp.swift
-//  Vyals
+//  VialsApp.swift
+//  Vials
 //
 //  Created by X on 8/26/26.
 //
@@ -9,7 +9,7 @@ import SwiftUI
 import SwiftData
 
 @main
-struct VyalsApp: App {
+struct VialsApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             Item.self,

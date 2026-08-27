@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  Vyals
+//  Vials
 //
 //  Created by X on 8/26/26.
 //

@@ -1,13 +1,13 @@
 //
-//  VyalsUITestsLaunchTests.swift
-//  VyalsUITests
+//  VialsUITestsLaunchTests.swift
+//  VialsUITests
 //
 //  Created by X on 8/26/26.
 //
 
 import XCTest
 
-final class VyalsUITestsLaunchTests: XCTestCase {
+final class VialsUITestsLaunchTests: XCTestCase {
 
     override class var runsForEachTargetApplicationUIConfiguration: Bool {
         true
