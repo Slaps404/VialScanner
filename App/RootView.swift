@@ -49,7 +49,7 @@ struct RootView: View {
                     .ignoresSafeArea()
 
                 page
-                    .frame(width: geo.size.width, height: geo.size.height)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(route == .scan ? Color.black : Theme.bg)
                     .clipShape(RoundedRectangle(cornerRadius: openness > 0 ? 32 : 0, style: .continuous))
                     .shadow(color: .black.opacity(0.18 * openness), radius: 24, x: -6, y: 0)
@@ -80,7 +80,7 @@ struct RootView: View {
             }
             .gesture(edgeDrag)
         }
-        .background((route == .scan ? Color.black : Theme.bg).ignoresSafeArea())
+        .ignoresSafeArea()
         .environmentObject(store)
         .preferredColorScheme(route == .scan ? .dark : nil)
         .task {
@@ -204,7 +204,7 @@ struct DrawerView: View {
                 Spacer()
             }
             .padding(.horizontal, 18)
-            .padding(.top, 8)
+            .padding(.top, Theme.safeAreaTop + 8)
             .padding(.bottom, 18)
 
             ForEach(Route.allCases) { r in
@@ -253,10 +253,8 @@ struct DrawerView: View {
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 22)
+            .padding(.bottom, Theme.safeAreaBottom + 16)
         }
-        .padding(.top, 14)
-        .padding(.bottom, 12)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Theme.bg.ignoresSafeArea())
     }
