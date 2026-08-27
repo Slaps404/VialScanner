@@ -23,6 +23,7 @@ struct ScanView: View {
     @State private var countdown: Double = 0
     @State private var countdownTotal: Double = 1
     @State private var autoAction: AutoAction? = nil
+    @State private var visualFocusPoint: CGPoint? = nil
 
     private enum AutoAction { case confirm, park, rescan }
 
@@ -34,18 +35,21 @@ struct ScanView: View {
 
             VStack(spacing: 0) {
                 topBar
-                    .padding(.top, Theme.safeAreaTop + 6)
                 Spacer()
                 bottomStack
-                    .padding(.bottom, Theme.safeAreaBottom + 12)
             }
             .padding(.horizontal, 16)
+            .padding(.bottom, 10)
         }
         .background(Color.black.ignoresSafeArea())
         .onAppear {
+            camera.autoTextFocusEnabled = store.settings.autoTextFocus
             camera.requestAccessAndConfigure()
             camera.setTorch(store.settings.torchOnByDefault)
             keepClip = store.settings.alwaysKeepClips
+            if store.settings.preferUltraWideZoom, camera.hasUltraWide {
+                camera.setZoom(0.5, animated: false)
+            }
         }
         .onDisappear { camera.stopSession() }
         .onChange(of: camera.phase) { _, phase in
@@ -71,11 +75,26 @@ struct ScanView: View {
     private var cameraLayer: some View {
         ZStack {
             if camera.permission == .authorized {
-                CameraPreview(session: camera.session) { point in
-                    camera.focus(at: point)
+                CameraPreview(session: camera.session, onFocusTap: { devicePoint, viewPoint in
+                    visualFocusPoint = viewPoint
+                    camera.focus(at: devicePoint, lockFocus: false)
                     Haptics.tap()
-                }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        if !camera.isFocusLocked { visualFocusPoint = nil }
+                    }
+                }, onPinch: { scale in
+                    camera.zoomBy(scale: scale)
+                })
                 .ignoresSafeArea()
+
+                if store.settings.showTextTrackingHUD {
+                    TextLockOverlay(boxes: camera.activeTextBoxes, isLocked: camera.isFocusLocked)
+                        .ignoresSafeArea()
+                }
+
+                FocusTargetReticle(point: visualFocusPoint, isLocked: camera.isFocusLocked)
+                    .ignoresSafeArea()
+
                 Reticle(inset: store.settings.roiInset, active: camera.phase == .scanning)
                     .ignoresSafeArea()
             } else {
@@ -149,6 +168,14 @@ struct ScanView: View {
                 .background(Capsule().fill(Color.black.opacity(0.42)))
             }
 
+            // Focus Lock Toggle
+            GlassCircleIcon(systemName: camera.isFocusLocked ? "lock.fill" : "lock.open",
+                            active: camera.isFocusLocked) {
+                camera.toggleFocusLock()
+                Haptics.tap()
+                if !camera.isFocusLocked { visualFocusPoint = nil }
+            }
+
             if camera.hasTorch {
                 GlassCircleIcon(systemName: camera.torchOn ? "bolt.fill" : "bolt.slash",
                                 active: camera.torchOn) {
@@ -164,13 +191,40 @@ struct ScanView: View {
 
     @ViewBuilder
     private var bottomStack: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
+            if camera.availableZoomOptions.count > 1, camera.phase != .finished {
+                zoomBar
+            }
+
             switch camera.phase {
             case .idle:      idleControls
             case .scanning:  scanningControls
             case .finished:  resultCard
             }
         }
+    }
+
+    private var zoomBar: some View {
+        HStack(spacing: 6) {
+            ForEach(camera.availableZoomOptions, id: \.self) { z in
+                let isSelected = abs(camera.userZoom - z) < 0.1
+                Button {
+                    camera.setZoom(z)
+                    Haptics.tap()
+                } label: {
+                    Text(z == 0.5 ? "0.5×" : (z == 1.0 ? "1×" : "\(Int(z))×"))
+                        .font(.system(size: 13, weight: isSelected ? .bold : .medium))
+                        .foregroundStyle(isSelected ? .black : .white)
+                        .frame(width: 44, height: 30)
+                        .background(
+                            Capsule().fill(isSelected ? Color.white : Color.black.opacity(0.48))
+                        )
+                }
+                .buttonStyle(PressScale())
+            }
+        }
+        .padding(4)
+        .background(Capsule().fill(Color.black.opacity(0.38)))
     }
 
     private var idleControls: some View {

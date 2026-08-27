@@ -97,7 +97,7 @@ public enum ScanState: Sendable {
     /// `progress` is readiness to answer, not frames burned: it blends elapsed
     /// time, OCR passes and rotation coverage, so the bar on screen fills as the
     /// scan actually approaches a verdict rather than at a fixed rate.
-    case scanning(framesSeen: Int, ocrFrames: Int, views: Int, progress: Double, hint: String)
+    case scanning(framesSeen: Int, ocrFrames: Int, views: Int, progress: Double, hint: String, textBoxes: [CGRect] = [])
     case finished(ScanResult)
 }
 
@@ -129,9 +129,9 @@ public final class ScanEngine {
     private var deadline = 0.0
     private var ocrBudget = 0
     private var extensionsGranted = 0
-
     private let textRequest: VNRecognizeTextRequest
     private let barcodeRequest: VNDetectBarcodesRequest
+    private var latestTextBoxes: [CGRect] = []
 
     public init(catalog: Catalog, config: EngineConfig = EngineConfig()) {
         self.config = config
@@ -167,6 +167,7 @@ public final class ScanEngine {
         deadline = config.maxScanDuration
         ocrBudget = config.maxOCRFrames
         extensionsGranted = 0
+        latestTextBoxes = []
     }
 
     @discardableResult
@@ -232,10 +233,18 @@ public final class ScanEngine {
             lastOCRTime = frame.timestamp
             ocrFrames += 1
             try? handler.perform([textRequest])
+            let roi = config.regionOfInterest ?? CGRect(x: 0, y: 0, width: 1, height: 1)
             let obs = (textRequest.results ?? []).compactMap { o -> TextObservation? in
                 guard let c = o.topCandidates(1).first, c.confidence > 0.3 else { return nil }
-                return TextObservation(text: c.string, confidence: c.confidence)
+                let box = CGRect(
+                    x: roi.minX + o.boundingBox.minX * roi.width,
+                    y: roi.minY + o.boundingBox.minY * roi.height,
+                    width: o.boundingBox.width * roi.width,
+                    height: o.boundingBox.height * roi.height
+                )
+                return TextObservation(text: c.string, confidence: c.confidence, boundingBox: box)
             }
+            latestTextBoxes = obs.compactMap(\.boundingBox)
             evidence.addFrame(obs)
 
             if ocrFrames >= config.earlyExitMinFrames,
@@ -266,7 +275,8 @@ public final class ScanEngine {
         return .scanning(framesSeen: framesSeen, ocrFrames: ocrFrames,
                          views: evidence.distinctViews,
                          progress: progress(elapsed: elapsed),
-                         hint: hint(paced: paced, budget: budget, sharpEnough: sharpEnough))
+                         hint: hint(paced: paced, budget: budget, sharpEnough: sharpEnough),
+                         textBoxes: latestTextBoxes)
     }
 
     /// Has the user shown the engine more than one face of the label — or run

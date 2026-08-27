@@ -288,12 +288,10 @@ struct Screen<Content: View>: View {
                 if let trailing { trailing }
             }
             .padding(.horizontal, Theme.pad)
-            .padding(.top, Theme.safeAreaTop + 6)
             .padding(.bottom, 12)
 
             content
         }
-        .padding(.bottom, Theme.safeAreaBottom)
         .background(Theme.bg.ignoresSafeArea())
     }
 }

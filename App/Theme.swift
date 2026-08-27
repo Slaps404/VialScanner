@@ -51,24 +51,6 @@ enum Theme {
     static let cardRadius: CGFloat = 22
     static let pad: CGFloat = 20
 
-    static var safeAreaTop: CGFloat {
-        if let windowScene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
-           let window = windowScene.windows.first(where: { $0.isKeyWindow }) ?? windowScene.windows.first {
-            let top = window.safeAreaInsets.top
-            if top > 0 { return top }
-        }
-        return 59
-    }
-
-    static var safeAreaBottom: CGFloat {
-        if let windowScene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
-           let window = windowScene.windows.first(where: { $0.isKeyWindow }) ?? windowScene.windows.first {
-            let bottom = window.safeAreaInsets.bottom
-            if bottom > 0 { return bottom }
-        }
-        return 34
-    }
-
     // MARK: Type
 
     static let display  = Font.system(size: 30, weight: .bold)

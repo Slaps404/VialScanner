@@ -45,12 +45,11 @@ struct RootView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                (route == .scan ? Color.black : Theme.bg)
-                    .ignoresSafeArea()
+                Theme.bg.ignoresSafeArea()
 
                 page
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(route == .scan ? Color.black : Theme.bg)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .background(Theme.bg)
                     .clipShape(RoundedRectangle(cornerRadius: openness > 0 ? 32 : 0, style: .continuous))
                     .shadow(color: .black.opacity(0.18 * openness), radius: 24, x: -6, y: 0)
                     .scaleEffect(1 - 0.06 * openness, anchor: .center)
@@ -66,7 +65,6 @@ struct RootView: View {
 
                 DrawerView(route: $route, open: $drawerOpen)
                     .frame(width: drawerWidth)
-                    .frame(maxHeight: .infinity)
                     .environmentObject(store)
                     .offset(x: -drawerWidth * (1 - openness))
                     .overlay(alignment: .trailing) {
@@ -80,9 +78,8 @@ struct RootView: View {
             }
             .gesture(edgeDrag)
         }
-        .ignoresSafeArea()
         .environmentObject(store)
-        .preferredColorScheme(route == .scan ? .dark : nil)
+        .preferredColorScheme(nil)
         .task {
             Speaker.shared.configureAudioSession()
             camera.reconfigure(catalog: store.catalog, config: store.settings.engineConfig())
@@ -204,7 +201,7 @@ struct DrawerView: View {
                 Spacer()
             }
             .padding(.horizontal, 18)
-            .padding(.top, Theme.safeAreaTop + 8)
+            .padding(.top, 8)
             .padding(.bottom, 18)
 
             ForEach(Route.allCases) { r in
@@ -253,9 +250,10 @@ struct DrawerView: View {
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, Theme.safeAreaBottom + 16)
+            .padding(.bottom, 22)
         }
         .frame(maxHeight: .infinity, alignment: .top)
+        .padding(.top, 54)
         .background(Theme.bg.ignoresSafeArea())
     }
 

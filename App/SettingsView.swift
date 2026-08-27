@@ -114,6 +114,21 @@ struct SettingsView: View {
                     }
                 }
 
+                Toggle(isOn: $store.settings.preferUltraWideZoom) {
+                    settingLabel("Prefer 0.5× Ultra-Wide / Macro", "Default to 0.5× lens for ~2 cm close focus on small vials.")
+                }
+                .tint(Theme.accent)
+
+                Toggle(isOn: $store.settings.autoTextFocus) {
+                    settingLabel("Auto text focus tracking", "Dynamically steers camera lens focus toward detected label text.")
+                }
+                .tint(Theme.accent)
+
+                Toggle(isOn: $store.settings.showTextTrackingHUD) {
+                    settingLabel("Show text tracking boxes", "Displays live visual bounding boxes around scanned label lines.")
+                }
+                .tint(Theme.accent)
+
                 Toggle(isOn: $store.settings.torchOnByDefault) {
                     settingLabel("Torch on by default", "Half power — full brightness turns a glass vial into a mirror.")
                 }

@@ -235,6 +235,10 @@ struct AppSettings: Codable {
     var defaultOwner: String = ""
     var defaultLocation: String = ""
     var defaultBox: String = ""
+    /// Camera optics and focus tracking
+    var preferUltraWideZoom: Bool = true
+    var autoTextFocus: Bool = true
+    var showTextTrackingHUD: Bool = true
     /// Engine knobs, surfaced because the right values are lab-dependent.
     var maxOCRFrames: Int = 24
     /// The floor on how long a scan runs before any answer is allowed to count.

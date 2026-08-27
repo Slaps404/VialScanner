@@ -1,11 +1,16 @@
 import Foundation
+import CoreGraphics
 
 /// One OCR line from one frame.
 public struct TextObservation: Sendable {
     public let text: String
     public let confidence: Float
-    public init(text: String, confidence: Float) {
-        self.text = text; self.confidence = confidence
+    public let boundingBox: CGRect?
+
+    public init(text: String, confidence: Float, boundingBox: CGRect? = nil) {
+        self.text = text
+        self.confidence = confidence
+        self.boundingBox = boundingBox
     }
 }
 
