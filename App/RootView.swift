@@ -80,7 +80,7 @@ struct RootView: View {
             }
             .gesture(edgeDrag)
         }
-        .ignoresSafeArea()
+        .background((route == .scan ? Color.black : Theme.bg).ignoresSafeArea())
         .environmentObject(store)
         .preferredColorScheme(route == .scan ? .dark : nil)
         .task {
@@ -253,10 +253,10 @@ struct DrawerView: View {
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 12)
+            .padding(.bottom, 22)
         }
-        .safeAreaPadding(.top, 8)
-        .safeAreaPadding(.bottom, 12)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Theme.bg.ignoresSafeArea())
     }

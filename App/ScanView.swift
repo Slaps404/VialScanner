@@ -34,12 +34,12 @@ struct ScanView: View {
 
             VStack(spacing: 0) {
                 topBar
+                    .padding(.top, 6)
                 Spacer()
                 bottomStack
+                    .padding(.bottom, 10)
             }
             .padding(.horizontal, 16)
-            .safeAreaPadding(.top, 4)
-            .safeAreaPadding(.bottom, 10)
         }
         .background(Color.black.ignoresSafeArea())
         .onAppear {
