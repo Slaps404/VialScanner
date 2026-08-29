@@ -133,9 +133,40 @@ struct ResultCard: View {
                     .foregroundStyle(Theme.text)
                 VStack(alignment: .leading, spacing: 4) {
                     KeyValueRow(key: "Lot", value: vial.lot, mono: true)
+                    // What somebody standing at the freezer actually needs off
+                    // the record: what it is, what it is conjugated to, how much
+                    // is there and what to dilute it to. All of it was already
+                    // in the CSV; none of it used to be loaded.
+                    KeyValueRow(key: "Status", value: vial.status)
+                    KeyValueRow(key: "Category", value: vial.category)
+                    KeyValueRow(key: "Conjugate", value: vial.conjugate)
                     KeyValueRow(key: "Concentration", value: vial.concentration)
+                    KeyValueRow(key: "Dilute to 2 µg/ml", value: vial.diluteTo2)
+                    KeyValueRow(key: "Amount", value: vial.amount)
+                    KeyValueRow(key: "Volume", value: volumeSummary(vial))
+                    KeyValueRow(key: "Formulation", value: vial.formulation)
                     KeyValueRow(key: "Owner", value: vial.owner)
+                    KeyValueRow(key: "Notes", value: vial.receivingNotes)
                 }
+                // The definition side of the join. Host and isotype decide a
+                // secondary antibody, so they belong on the vial's card even
+                // though they live in the other table.
+                if let def = result.definition {
+                    VStack(alignment: .leading, spacing: 4) {
+                        KeyValueRow(key: "Host", value: def.host)
+                        KeyValueRow(key: "Isotype", value: def.isotype)
+                        KeyValueRow(key: "Vendor", value: def.vendor)
+                        KeyValueRow(key: "Catalog #", value: def.catalog, mono: true)
+                        KeyValueRow(key: "Reactivity", value: def.reactivity)
+                        KeyValueRow(key: "Storage", value: def.storageLocation)
+                    }
+                    if let url = URL(string: def.productURL), !def.productURL.isEmpty {
+                        Link("Vendor datasheet", destination: url)
+                            .font(Theme.label)
+                            .foregroundStyle(Theme.accent)
+                    }
+                }
+                remainingFields(vial)
             }
         } else if let def = result.definition {
             VStack(alignment: .leading, spacing: 8) {
@@ -159,6 +190,35 @@ struct ResultCard: View {
                     KeyValueRow(key: "Clone", value: result.fields[.clone] ?? "")
                 }
             }
+        }
+    }
+
+    /// `50 of 100 µl` when both are known, otherwise whichever one is.
+    private func volumeSummary(_ vial: InventoryItem) -> String {
+        let current = vial.currentVolume, initial = vial.initialVolume
+        if !current.isEmpty, !initial.isEmpty { return "\(current) of \(initial)" }
+        return current.isEmpty ? initial : current
+    }
+
+    /// Every remaining non-empty column, collapsed. The named rows above are the
+    /// answer to "what is this vial"; this is the escape hatch for the columns
+    /// this app has no opinion about, including ones added to the base later.
+    @ViewBuilder
+    private func remainingFields(_ vial: InventoryItem) -> some View {
+        let rest = vial.extra.others(excluding: InventoryItem.namedHeaders)
+        if !rest.isEmpty {
+            DisclosureGroup("All catalog fields (\(rest.count))") {
+                VStack(alignment: .leading, spacing: 4) {
+                    // Indexed rather than keyed by name: an export can repeat a
+                    // header, and duplicate ForEach ids drop rows silently.
+                    ForEach(Array(rest.enumerated()), id: \.offset) { _, e in
+                        KeyValueRow(key: e.name, value: e.value)
+                    }
+                }
+                .padding(.top, 4)
+            }
+            .font(Theme.label)
+            .tint(Theme.textSecond)
         }
     }
 

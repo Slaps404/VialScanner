@@ -426,31 +426,73 @@ final class AppStore: ObservableObject {
 
     // MARK: - Export
 
+    /// Columns the app owns: whatever the operator edited here wins over the
+    /// value that came in from the import, even though both live in the row.
+    private static let ownedInventoryColumns: [String: (ItemRecord) -> String] = [
+        "AbNo": { $0.abNo }, "Antibody Definitions": { $0.definitionName },
+        "Vial Name": { $0.vialName }, "Ab Lot": { $0.lot },
+        "Concentration": { $0.concentration }, "Location": { $0.location },
+        "Box": { $0.box }, "Owner": { $0.owner }, "Ab Status": { $0.status },
+    ]
+
     func exportInventoryCSV() -> URL? {
-        var rows: [[String]] = [[
-            "AbNo", "Antibody Definitions", "Vial Name", "Ab Lot", "Concentration",
-            "Location", "Box", "Owner", "Ab Status", "Notes", "Received", "Added on device",
-            "Last confirmed",
-        ]]
-        for i in items.sorted(by: { (Int($0.abNo) ?? 0) < (Int($1.abNo) ?? 0) }) {
-            rows.append([
-                i.abNo, i.definitionName, i.vialName, i.lot, i.concentration,
-                i.location, i.box, i.owner, i.status, i.notes,
-                i.receivedAt.map(Self.stamp) ?? "", i.isLocal ? "yes" : "",
-                i.lastConfirmedAt.map(Self.stamp) ?? "",
-            ])
+        let sorted = items.sorted { (Int($0.abNo) ?? 0) < (Int($1.abNo) ?? 0) }
+
+        // Reproduce the imported column set, in its original order, so the file
+        // can go straight back into Airtable. Before this, export wrote nine
+        // columns and every other imported field was lost on a round trip.
+        var source: [String] = []
+        var seen = Set<String>()
+        for i in sorted {
+            for e in i.fields.entries where !seen.contains(normKey(e.name)) {
+                seen.insert(normKey(e.name)); source.append(e.name)
+            }
+        }
+        for owned in Self.ownedInventoryColumns.keys.sorted() where !seen.contains(normKey(owned)) {
+            seen.insert(normKey(owned)); source.append(owned)
+        }
+        // App-only columns, appended so Airtable can ignore them by position.
+        let appOnly = ["Notes", "Received", "Added on device", "Last confirmed"]
+
+        var rows: [[String]] = [source + appOnly]
+        for i in sorted {
+            var row = source.map { col -> String in
+                if let owned = Self.ownedInventoryColumns[col] { return owned(i) }
+                return i.fields[col] ?? ""
+            }
+            row += [i.notes, i.receivedAt.map(Self.stamp) ?? "",
+                    i.isLocal ? "yes" : "", i.lastConfirmedAt.map(Self.stamp) ?? ""]
+            rows.append(row)
         }
         return write(rows, name: "inventory-\(Self.fileStamp()).csv")
     }
 
+    private static let ownedDefinitionColumns: [String: (DefRecord) -> String] = [
+        "AntibodyName": { $0.name }, "Target": { $0.target }, "Clone": { $0.clone },
+        "Host": { $0.host }, "Isotype": { $0.isotype }, "Vendor": { $0.vendor },
+        "Catalog#": { $0.catalog },
+        "Inventory Items": { $0.inventoryLinks.joined(separator: ", ") },
+    ]
+
     func exportDefinitionsCSV() -> URL? {
-        var rows: [[String]] = [[
-            "AntibodyName", "Target", "Clone", "Host", "Isotype", "Vendor", "Catalog#",
-            "Inventory Items", "Added on device",
-        ]]
+        var source: [String] = []
+        var seen = Set<String>()
         for d in defs {
-            rows.append([d.name, d.target, d.clone, d.host, d.isotype, d.vendor, d.catalog,
-                         d.inventoryLinks.joined(separator: ", "), d.isLocal ? "yes" : ""])
+            for e in d.fields.entries where !seen.contains(normKey(e.name)) {
+                seen.insert(normKey(e.name)); source.append(e.name)
+            }
+        }
+        for owned in Self.ownedDefinitionColumns.keys.sorted() where !seen.contains(normKey(owned)) {
+            seen.insert(normKey(owned)); source.append(owned)
+        }
+        var rows: [[String]] = [source + ["Added on device"]]
+        for d in defs {
+            var row = source.map { col -> String in
+                if let owned = Self.ownedDefinitionColumns[col] { return owned(d) }
+                return d.fields[col] ?? ""
+            }
+            row.append(d.isLocal ? "yes" : "")
+            rows.append(row)
         }
         return write(rows, name: "definitions-\(Self.fileStamp()).csv")
     }

@@ -70,6 +70,12 @@ Airtable" for the exact rule per verdict.
 
 ## Data flow / persistence
 
+- Every column of the source row rides along in a `FieldBag` on
+  `AntibodyDefinition.extra` / `InventoryItem.extra`, addressable by its printed
+  header. The named stored properties are only what the *engine* matches on;
+  category, conjugate, formulation, amounts, prices and links are bag lookups
+  behind named accessors (`vial.category`, `def.price`). A column added to the
+  Airtable base appears in the app with no code change.
 - Catalog (definitions + inventory) loads from CSV via `Catalog.load` — that's
   the only place that knows about CSV as a format. Swapping in a live source
   (e.g. Airtable) means replacing that one function; `ScanEngine`/`Matcher`

@@ -122,6 +122,29 @@ for v in videos {
         if !result.otherVials.isEmpty {
             print("    also       : \(result.otherVials.map { "AbNo \($0.abNo)" }.joined(separator: ", "))")
         }
+        // The record behind the identifier: this is what the scan is *for*, and
+        // it is the fastest way to see whether the catalog columns loaded.
+        let record: [(String, String)] = [
+            ("status", vial.status), ("category", vial.category),
+            ("conjugate", vial.conjugate), ("amount", vial.amount),
+            ("conc", vial.concentration), ("dilute to 2", vial.diluteTo2),
+            ("initial vol", vial.initialVolume), ("current vol", vial.currentVolume),
+            ("formulation", vial.formulation), ("owner", vial.owner),
+            ("notes", vial.receivingNotes),
+        ].filter { !$0.1.isEmpty }
+        if !record.isEmpty {
+            print("    record     : " + record.map { "\($0.0)=\($0.1)" }.joined(separator: "  "))
+        }
+        if let d = result.definition {
+            let cross: [(String, String)] = [
+                ("host", d.host), ("isotype", d.isotype), ("reactivity", d.reactivity),
+                ("price", d.price), ("storage", d.storageLocation),
+            ].filter { !$0.1.isEmpty }
+            if !cross.isEmpty {
+                print("    from def   : " + cross.map { "\($0.0)=\($0.1)" }.joined(separator: "  "))
+            }
+            if !d.productURL.isEmpty { print("    datasheet  : \(d.productURL)") }
+        }
     } else if result.definition != nil {
         if result.lotNotOnRecord {
             print("    vial       : LOT NOT ON RECORD — new lot of a known antibody")

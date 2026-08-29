@@ -23,25 +23,35 @@ struct DefRecord: Codable, Identifiable, Hashable {
     /// Added on this device rather than imported. Kept so an import can be
     /// merged without silently discarding local receiving work.
     var isLocal: Bool = false
+    /// Every other column of the imported row. Optional purely so a document
+    /// written before this field existed still decodes: Swift's synthesised
+    /// `init(from:)` throws on a missing non-optional key even when the property
+    /// has a default, and a throw here would discard somebody's receiving work.
+    var extra: FieldBag? = nil
+
+    var fields: FieldBag { extra ?? FieldBag() }
 
     var core: AntibodyDefinition {
         AntibodyDefinition(name: name, target: target, clone: clone, host: host,
                            isotype: isotype, vendor: vendor, catalog: catalog,
-                           inventoryLinks: inventoryLinks)
+                           inventoryLinks: inventoryLinks, extra: fields)
     }
 
     init(id: UUID = UUID(), name: String, target: String = "", clone: String = "",
          host: String = "", isotype: String = "", vendor: String = "",
-         catalog: String = "", inventoryLinks: [String] = [], isLocal: Bool = false) {
+         catalog: String = "", inventoryLinks: [String] = [], isLocal: Bool = false,
+         extra: FieldBag? = nil) {
         self.id = id; self.name = name; self.target = target; self.clone = clone
         self.host = host; self.isotype = isotype; self.vendor = vendor
         self.catalog = catalog; self.inventoryLinks = inventoryLinks; self.isLocal = isLocal
+        self.extra = extra
     }
 
     init(_ d: AntibodyDefinition) {
         self.init(name: d.name, target: d.target, clone: d.clone, host: d.host,
                   isotype: d.isotype, vendor: d.vendor, catalog: d.catalog,
-                  inventoryLinks: d.inventoryLinks)
+                  inventoryLinks: d.inventoryLinks,
+                  extra: d.extra.isEmpty ? nil : d.extra)
     }
 }
 
@@ -62,28 +72,40 @@ struct ItemRecord: Codable, Identifiable, Hashable {
     /// Last time a scan confirmed this vial physically exists.
     var lastConfirmedAt: Date? = nil
     var lastScanID: UUID? = nil
+    /// Every other column of the imported row. Optional for the same decoding
+    /// reason as `DefRecord.extra`.
+    var extra: FieldBag? = nil
+
+    var fields: FieldBag { extra ?? FieldBag() }
 
     var core: InventoryItem {
         InventoryItem(abNo: abNo, definitionName: definitionName, vialName: vialName,
                       lot: lot, concentration: concentration, location: location,
-                      box: box, owner: owner)
+                      box: box, owner: owner, extra: fields)
     }
 
     init(id: UUID = UUID(), abNo: String, definitionName: String = "", vialName: String = "",
          lot: String = "", concentration: String = "", location: String = "", box: String = "",
          owner: String = "", status: String = "", notes: String = "", receivedAt: Date? = nil,
-         isLocal: Bool = false, lastConfirmedAt: Date? = nil, lastScanID: UUID? = nil) {
+         isLocal: Bool = false, lastConfirmedAt: Date? = nil, lastScanID: UUID? = nil,
+         extra: FieldBag? = nil) {
         self.id = id; self.abNo = abNo; self.definitionName = definitionName
         self.vialName = vialName; self.lot = lot; self.concentration = concentration
         self.location = location; self.box = box; self.owner = owner; self.status = status
         self.notes = notes; self.receivedAt = receivedAt; self.isLocal = isLocal
         self.lastConfirmedAt = lastConfirmedAt; self.lastScanID = lastScanID
+        self.extra = extra
     }
 
     init(_ i: InventoryItem) {
+        // `Ab Status` lives in the bag as an imported column and in `status` as
+        // an editable one; seed the editable copy so the app shows it before
+        // anybody touches it.
         self.init(abNo: i.abNo, definitionName: i.definitionName, vialName: i.vialName,
                   lot: i.lot, concentration: i.concentration, location: i.location,
-                  box: i.box, owner: i.owner)
+                  box: i.box, owner: i.owner, status: i.status,
+                  notes: i.receivingNotes,
+                  extra: i.extra.isEmpty ? nil : i.extra)
     }
 
     var displayName: String {

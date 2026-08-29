@@ -242,6 +242,21 @@ struct VialDetailSheet: View {
                             }
                         }
 
+                        // Everything else the import carried. Kept in its own
+                        // card rather than merged above: the card over it is the
+                        // record this app edits, this one is what Airtable said.
+                        let carried = item.fields.others(excluding: ["AbNo"])
+                        if !carried.isEmpty {
+                            Card {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    SectionLabel(text: "All catalog fields")
+                                    ForEach(Array(carried.enumerated()), id: \.offset) { _, e in
+                                        KeyValueRow(key: e.name, value: e.value)
+                                    }
+                                }
+                            }
+                        }
+
                         if let def = store.definition(named: item.definitionName) {
                             Card {
                                 VStack(alignment: .leading, spacing: 6) {
@@ -252,6 +267,14 @@ struct VialDetailSheet: View {
                                     KeyValueRow(key: "Isotype", value: def.isotype)
                                     KeyValueRow(key: "Vendor", value: def.vendor)
                                     KeyValueRow(key: "Catalog #", value: def.catalog, mono: true)
+                                    KeyValueRow(key: "Reactivity", value: def.core.reactivity)
+                                    KeyValueRow(key: "Price", value: def.core.price)
+                                    KeyValueRow(key: "Storage", value: def.core.storageLocation)
+                                    if let u = URL(string: def.core.productURL), !def.core.productURL.isEmpty {
+                                        Link("Vendor datasheet", destination: u)
+                                            .font(Theme.label)
+                                            .foregroundStyle(Theme.accent)
+                                    }
                                 }
                             }
                         }
