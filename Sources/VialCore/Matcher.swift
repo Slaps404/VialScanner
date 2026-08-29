@@ -114,14 +114,18 @@ public struct Matcher: Sendable {
         for f in LabelField.allCases {
             if let v = ev.vote(f, minFrames: standard.minFrames(for: f)) { fields[f] = v.value }
         }
-        let level = Self.evidenceLevel(ev, fields: fields)
-
         // ---- Tier 1: barcode ------------------------------------------------
         for bc in ev.barcodes {
             // One decode is one glimpse, and a DataMatrix in the tray behind the
             // vial being held decodes exactly as cleanly as the one on it.
             guard ev.frames(for: bc) >= standard.minBarcodeFrames else { continue }
             guard let cat = bc.catalog else { continue }
+            // A decoded payload is stronger than OCR.  Promote it into the
+            // common field map so receive/review screens do not show a blank or
+            // contradictory catalog/lot while the reason line uses the barcode.
+            fields[.catalog] = cat
+            if let lot = bc.lot, !lot.isEmpty { fields[.lot] = lot }
+            let level = Self.evidenceLevel(ev, fields: fields)
             let hits = catalog.definitionIndices(forCatalog: cat)
             if let idx = hits.first {
                 let def = catalog.definitions[idx]
@@ -141,6 +145,8 @@ public struct Matcher: Sendable {
                 reasons: ["barcode \(bc.symbology) decoded catalog \(cat) — not in catalog"], lotNotOnRecord: false,
                 fields: fields, barcode: bc, framesUsed: ev.frameCount, evidenceLevel: level)
         }
+
+        let level = Self.evidenceLevel(ev, fields: fields)
 
         // ---- Tier 2: exact catalog number from voted text -------------------
         if let cat = fields[.catalog] {

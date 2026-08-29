@@ -107,9 +107,13 @@ public struct EvidenceBuffer: Sendable {
         }
 
         // Field extraction runs per frame; each frame casts one vote per field.
-        let fields = extractFields(from: observations.map(\.text))
-        for (field, value) in fields {
-            fieldVotes[field, default: [:]][value, default: 0] += 1
+        // The vote is weighted, not counted: a keyword-anchored read is worth a
+        // whole frame, a shape-only read a fraction of one. That is the whole
+        // mechanism keeping `\b[1-9]\d{5}\b` from deciding a vial's identity
+        // off two lucky frames — it has to out-accumulate, not merely appear.
+        let fields = extractFields(from: observations)
+        for (field, reading) in fields {
+            fieldVotes[field, default: [:]][reading.value, default: 0] += reading.weight
         }
     }
 
@@ -136,6 +140,26 @@ public struct EvidenceBuffer: Sendable {
                 merged[key] = (value, count)
             }
         }
+        // Reconcile a keyword-anchored fragment with a later complete read that
+        // differs in one character at the seam.  Example: `C28` followed by
+        // `C2355` means the complete value is `C2855`; the short observation is
+        // trusted only for the prefix it actually saw.  Partial reads carry
+        // sub-frame weight and therefore cannot become output on their own.
+        let fuzzyKeys = merged.keys.sorted { $0.count < $1.count }
+        for short in fuzzyKeys where short.count == 3 {
+            guard let s = merged[short], s.score < 1 else { continue }
+            let candidates = fuzzyKeys.filter { long in
+                guard long.count > short.count else { return false }
+                let prefix = String(long.prefix(short.count))
+                return editDistance(short, prefix) == 1 && short.first == long.first
+            }
+            guard candidates.count == 1, let longKey = candidates.first,
+                  let l = merged[longKey] else { continue }
+            let corrected = short + String(longKey.dropFirst(short.count))
+            merged[corrected] = (short.uppercased() + String(l.repr.dropFirst(short.count)), s.score + l.score)
+            merged.removeValue(forKey: short)
+            merged.removeValue(forKey: longKey)
+        }
         // OCR truncates at the edge of the visible label curve, so the same value
         // often appears as `S10` in one frame and `S107` in the next. Fold a
         // strict prefix into its longer form instead of letting them compete.
@@ -145,6 +169,13 @@ public struct EvidenceBuffer: Sendable {
             let extensions = keys.filter { $0.count > short.count && $0.hasPrefix(short) }
             guard extensions.count == 1, let longKey = extensions.first,
                   var l = merged[longKey] else { continue }
+            // One spurious trailing glyph must not replace a value read cleanly
+            // in several frames (`364107` + one `3641071`).  Extend only when
+            // the longer form has independent support or is at least as well
+            // supported as the truncation it would absorb.
+            if longKey.count == short.count + 1 {
+                guard l.score >= 2 || l.score >= s.score else { continue }
+            }
             l.score += s.score
             merged[longKey] = l
             merged.removeValue(forKey: short)
