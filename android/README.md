@@ -139,3 +139,44 @@ a device** - nothing here has seen a camera. Every screen is unQA'd.
 Ported from iOS: scanning, persistence, inventory browsing, review queue, audits,
 scan log, session box, CSV/JSON import and export, settings. Not ported: clip
 recording (the per-scan video kept with a parked result) and speech feedback.
+
+## The sharpness gate was mis-scaled (found by video replay, now fixed)
+
+`EngineConfig.sharpnessRatio = 0.45` skips any frame scoring below 45% of the
+best focus seen so far. That constant is only meaningful next to the thumbnail
+the focus measure runs on: a harder downscale averages away high-frequency
+detail, which pulls a crisp frame and a blurred one closer together, and a
+softer one spreads them apart. Swift measures on a 160px thumbnail. The Kotlin
+port used 240px and inherited the constant, so the same 0.45 threw away frames
+Swift keeps:
+
+| clip | frames reaching OCR at 240px | at 160px |
+|---|---|---|
+| PXL_20260830_202813337 | 7 / 12 | 12 / 12 |
+| PXL_20260830_202545311 | 35 / 52 | 52 / 52 |
+
+On `202813337` the crisp early frames show only the DataMatrix; the catalog
+number is on a blurrier later face, and the gate locked exactly that face out.
+Android returned NOT_FOUND where Swift returned CONFIDENT. With the thumbnail
+matched to Swift's 160px it returns CONFIDENT `14-0808-82`, lot `2829436`,
+LOT-NOT-ON-RECORD, which is Swift's answer field for field.
+
+The lesson generalises: a threshold expressed as a fraction of a measurement is
+only portable together with how the measurement is scaled.
+
+## Where the two engines still disagree
+
+Over the 39 sample recordings (20 Pixel, 19 iPhone) the engines return the same
+verdict class on 36. All three exceptions are Apple Vision reading small text
+better than ML Kit on the same pixels, and all three fall on the safe side -
+Android is *less* confident, never confidently wrong:
+
+| clip | Swift | Android | ML Kit's read |
+|---|---|---|---|
+| PXL_20260830_202456307 | CONFIDENT 10.0 | AMBIGUOUS 6.0 | `24510SF` yes, clone `E5I9V` never |
+| PXL_20260830_202701348 | AMBIGUOUS 6.0 | NOT_FOUND 3.9 | `46173SE` for `46173SF` |
+| IMG_4070 | CONFIDENT 11.6 | AMBIGUOUS 6.5 | `AB186`, `AB186921`, `8186928` for `ab186928` |
+
+Use `-e only <substring>` and `-e dumpText true` to see this yourself: the
+harness then prints every line ML Kit returned per frame, which is what
+separates "OCR never saw it" from "extraction rejected what OCR saw".

@@ -117,13 +117,17 @@ class MlKitFrame(
 
     companion object {
         /**
-         * Variance of a 3x3 Laplacian over a downsampled gray copy. Only ever
-         * compared against other frames of the same stream, so the absolute
-         * scale does not matter - what matters is that a motion-blurred frame
-         * scores far below a crisp one, and that measuring it is cheap enough to
-         * run on every frame that passes the pacing gate.
+         * Variance of a 3x3 Laplacian over a downsampled gray copy.
+         *
+         * `target` is not a free performance knob: it sets how hard the
+         * downscale averages, which sets how far apart a crisp frame and a
+         * blurred one score, and `EngineConfig.sharpnessRatio` is a fixed
+         * fraction of the best score seen. Bigger thumbnails widen that spread,
+         * so the same 0.45 throws away frames it was never meant to. 160 is
+         * what Swift's `Frame.computeSharpness` uses and what the ratio was
+         * tuned against; a 240px copy starved whole clips of OCR frames.
          */
-        fun laplacianVariance(src: Bitmap, target: Int = 240): Double {
+        fun laplacianVariance(src: Bitmap, target: Int = 160): Double {
             val s = min(1.0, target.toDouble() / max(src.width, src.height))
             val w = max(3, (src.width * s).roundToInt())
             val h = max(3, (src.height * s).roundToInt())

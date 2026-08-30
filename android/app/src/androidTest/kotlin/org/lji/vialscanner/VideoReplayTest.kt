@@ -13,6 +13,10 @@ import org.lji.vialcore.extractFieldsFromLines
 import org.lji.vialcore.LabelField
 import org.lji.vialcore.ScanEngine
 import org.lji.vialcore.ScanState
+import org.lji.vialcore.BarcodePayload
+import org.lji.vialcore.NormRect
+import org.lji.vialcore.TextObservation
+import org.lji.vialcore.VialFrame
 import java.io.File
 
 /**
@@ -32,6 +36,32 @@ import java.io.File
 class VideoReplayTest {
 
     private val tag = "VialReplay"
+
+    /**
+     * Passes a frame through untouched but records what OCR returned for it.
+     * Wrapping rather than editing `MlKitFrame` keeps the logging out of the
+     * app build, and wrapping *outside* the engine means only frames the
+     * sharpness and pacing gates actually let through get logged - so a silent
+     * clip in the dump is itself the finding.
+     */
+    private inner class Logging(
+        private val inner: VialFrame,
+        private val video: String,
+        private val index: Int,
+        private val sink: StringBuilder,
+    ) : VialFrame {
+        override val timestamp get() = inner.timestamp
+        override val sharpness get() = inner.sharpness
+        override fun detectBarcodes(roi: NormRect?): List<BarcodePayload> =
+            inner.detectBarcodes(roi).also { codes ->
+                for (c in codes) sink.appendLine("  $video f$index code[${c.symbology}] ${c.raw}")
+            }
+        override fun recognizeText(roi: NormRect?): List<TextObservation> =
+            inner.recognizeText(roi).also { obs ->
+                sink.appendLine("  $video f$index sharp=%.1f lines=%d".format(inner.sharpness, obs.size))
+                for (o in obs) sink.appendLine("    | ${o.text}")
+            }
+    }
 
     /**
      * The Unicode class fix, checked on the platform it has to hold on.
@@ -58,6 +88,11 @@ class VideoReplayTest {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val ocrLongEdge = InstrumentationRegistry.getArguments().getString("ocrLongEdge")?.toInt() ?: 1080
         val dirName = InstrumentationRegistry.getArguments().getString("frames") ?: "frames"
+        // Diagnostics: narrow to one clip and print every line ML Kit returns.
+        // Without this a disagreement with Swift is indistinguishable between
+        // "OCR never saw the text" and "extraction rejected the text it saw".
+        val only = InstrumentationRegistry.getArguments().getString("only")
+        val dumpText = InstrumentationRegistry.getArguments().getString("dumpText") == "true"
         // The media dir, not getExternalFilesDir: under scoped storage a file
         // pushed by adb into the app's data dir is not readable by the app.
         val root = ctx.externalMediaDirs.first()
@@ -77,6 +112,8 @@ class VideoReplayTest {
 
         // `<video>_<seq>.jpg` - everything before the last underscore is the clip.
         val byVideo = files.groupBy { it.name.substringBeforeLast('_') }
+            .filterKeys { only == null || it.contains(only) }
+        require(byVideo.isNotEmpty()) { "no clip matches only=$only" }
         for ((video, frames) in byVideo.toSortedMap()) {
             val engine = ScanEngine(catalog, EngineConfig())
             val began = System.nanoTime()
@@ -86,7 +123,8 @@ class VideoReplayTest {
                 val bmp = BitmapFactory.decodeFile(f.absolutePath) ?: continue
                 // 6 fps in, same as the CLI: the engine paces itself off these
                 // timestamps, so they have to be the recording's, not the wall clock.
-                state = engine.ingest(MlKitFrame(bmp, i / 6.0, recognizer, scanner, ocrLongEdge))
+                val frame = MlKitFrame(bmp, i / 6.0, recognizer, scanner, ocrLongEdge)
+                state = engine.ingest(if (dumpText) Logging(frame, video, i, report) else frame)
                 bmp.recycle()
                 used = i + 1
                 if (state is ScanState.Finished) break
