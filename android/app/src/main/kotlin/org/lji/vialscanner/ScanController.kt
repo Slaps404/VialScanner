@@ -20,7 +20,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.LifecycleOwner
 import androidx.core.content.ContextCompat
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import org.lji.vialcore.ScanEngine
@@ -39,7 +41,26 @@ class ScanController(private val store: AppStore) {
 
     private val analysisExecutor = Executors.newSingleThreadExecutor()
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-    private val scanner = BarcodeScanning.getClient()
+    /**
+     * The same seven symbologies Swift asks Vision for
+     * (`ScanEngine.swift`'s `barcodeRequest`), and no more. Left unrestricted,
+     * ML Kit hunts every format it knows on every frame, which costs time the
+     * pacing budget has to pay for and can surface a code the Swift side would
+     * never have reported. `MlKitFrame.symbologyName` names exactly these.
+     */
+    private val scanner = BarcodeScanning.getClient(
+        BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(
+                Barcode.FORMAT_DATA_MATRIX,
+                Barcode.FORMAT_QR_CODE,
+                Barcode.FORMAT_CODE_128,
+                Barcode.FORMAT_CODE_39,
+                Barcode.FORMAT_EAN_13,
+                Barcode.FORMAT_PDF417,
+                Barcode.FORMAT_AZTEC,
+            )
+            .build()
+    )
 
     var state by mutableStateOf<ScanState>(idle())
         private set
