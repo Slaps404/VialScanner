@@ -5,3 +5,7 @@
 *.xcuserstate
 xcuserdata/
 DerivedData/
+android/local.properties
+android/.gradle/
+android/build/
+android/*/build/

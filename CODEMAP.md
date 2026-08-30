@@ -116,8 +116,9 @@ coordinate-origin hazard, and what the replay does not cover.
   videos.
 - `App/Models.swift`, `App/Store.swift`: type-checked against the macOS SDK
   (they only import Foundation + VialCore).
-- `android/vialcore`: compiles with kotlinc and passes the tape replay here.
-  `android/app` has never been built — no Android SDK or Gradle on this machine.
+- `android/vialcore`: compiles and passes the tape replay here (43/43).
+- `android/app`: assembles (`./gradlew assembleDebug`) and lints clean, but has
+  never run on a device — no screen in it has been QA'd.
 - Everything importing SwiftUI/UIKit/AVFoundation (the rest of `App/`): parse-
   checked only, never built or run — this dev machine has no iOS SDK (no
   Xcode, CommandLineTools only). Expect first-build fixups in Xcode.

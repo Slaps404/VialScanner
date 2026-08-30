@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Exports are written to cacheDir/exports and shared out from there; the
+         share sheet cannot read a plain file:// path on API 24+. -->
+    <cache-path name="exports" path="exports/" />
+</paths>

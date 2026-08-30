@@ -8,8 +8,11 @@ the Android-specific shell around it.
 vialcore/   Pure Kotlin/JVM. No Android SDK, no ML Kit, no CameraX.
             Text.kt  Catalog.kt  FieldExtraction.kt  Evidence.kt
             Matcher.kt  ScanEngine.kt
-app/        CameraX + ML Kit + Compose. MlKitFrame.kt is the entire
-            platform surface; MainActivity.kt is camera plumbing and the screen.
+app/        CameraX + ML Kit + Compose.
+            MlKitFrame.kt      the entire platform surface (OCR, barcodes, sharpness)
+            ScanController.kt  camera binding, frame pacing, torch
+            Models.kt Store.kt persistence: one JSON doc, imports, exports
+            MainActivity.kt    tabbed shell; ScanScreen/Screens/Sheets/Common the UI
 ```
 
 ## The one structural change from Swift
@@ -71,13 +74,36 @@ passes, and in `Matcher`'s ranking, so two candidates with equal scores can swap
 between runs on identical evidence. Kotlin sorts deterministically in all three.
 These are the only differences a parity run should ever surface.
 
+## Building
+
+```bash
+cd android
+echo "sdk.dir=$ANDROID_HOME" > local.properties   # or set ANDROID_HOME
+JAVA_HOME=/opt/homebrew/opt/openjdk@21/... ./gradlew assembleDebug
+```
+
+The wrapper is pinned to Gradle 8.10.2 because AGP 8.7.3 supports neither the
+Gradle 9.x nor the JDK 26 that Homebrew installs by default. JDK 21 works;
+the modules target 17 bytecode without demanding a JDK 17 toolchain.
+
+## Unicode traps (found by review, now fixed)
+
+Java's regex classes (`\b`, `\w`, `\s`) are ASCII by default; ICU's, which
+Swift uses, are Unicode-aware. Untreated, a `µ` glued to a part number made
+`BE0106µ` yield a catalog number on Android and nothing on iOS, and a
+non-breaking space after `LOT` dropped that read from weight 1.0 to 0.6. Every
+pattern here compiles through `urx()` with `UNICODE_CHARACTER_CLASS`. In the
+same family: `normKey`/`tokenize` now keep combining marks and non-decimal
+numerals (Swift's `CharacterSet.alphanumerics` does), the edit distances count
+grapheme clusters rather than UTF-16 units, and `looksLikeYearMonth` drops empty
+split fields so a smudged `2020--11` is still read as an expiry.
+
 ## Build status
 
-`:vialcore` compiles and passes the parity replay on this machine (kotlinc 2.2.20,
-JDK 25). `:app` has **never been built**: this machine has no Android SDK and no
-Gradle. Expect first-build fixups in Android Studio, particularly around the
-CameraX and Compose versions pinned in `app/build.gradle.kts`.
+`:vialcore` compiles and passes the parity replay on this machine.
+`:app` assembles (`assembleDebug`) and passes `lintDebug`, but has **never run on
+a device** - nothing here has seen a camera. Every screen is unQA'd.
 
-Not ported yet: persistence, inventory browsing, review queue, audits, the scan
-log and the session box. The Android app scans and reports; the iOS app is still
-the one that writes anything down.
+Ported from iOS: scanning, persistence, inventory browsing, review queue, audits,
+scan log, session box, CSV/JSON import and export, settings. Not ported: clip
+recording (the per-scan video kept with a parked result) and speech feedback.

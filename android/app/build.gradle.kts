@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jetbrains.kotlin.plugin.serialization")
 }
 
 android {
@@ -25,6 +26,7 @@ android {
 
 dependencies {
     implementation(project(":vialcore"))
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     val camerax = "1.4.1"
     implementation("androidx.camera:camera-core:$camerax")
@@ -42,4 +44,5 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("androidx.core:core-ktx:1.15.0")
 }
