@@ -178,7 +178,10 @@ class Catalog(
             load(readStripped(definitionsCSV), readStripped(inventoryCSV))
 
         fun load(definitionsCSV: String, inventoryCSV: String): Catalog {
-            val dRows = parseCSV(definitionsCSV)
+            // Excel and Airtable both write a UTF-8 BOM; strip it here as well as
+            // in the `File` overload, because the app imports text it has already
+            // read from a content URI and never touches the file path.
+            val dRows = parseCSV(stripBOM(definitionsCSV))
             val dHead = dRows.firstOrNull() ?: throw CatalogException("definitions: empty file")
             val dIdx = indexer(dHead)
             fun dCol(n: String) = dIdx(n) ?: throw CatalogException("definitions: missing column $n")
@@ -209,7 +212,7 @@ class Catalog(
                 )
             }
 
-            val iRows = parseCSV(inventoryCSV)
+            val iRows = parseCSV(stripBOM(inventoryCSV))
             val iHead = iRows.firstOrNull() ?: throw CatalogException("inventory: empty file")
             val iIdx = indexer(iHead)
             fun iCol(n: String) = iIdx(n) ?: throw CatalogException("inventory: missing column $n")
@@ -241,11 +244,9 @@ class Catalog(
             return Catalog(defs, items)
         }
 
-        private fun readStripped(f: File): String {
-            var s = f.readText(Charsets.UTF_8)
-            if (s.startsWith("﻿")) s = s.substring(1)
-            return s
-        }
+        private fun readStripped(f: File): String = stripBOM(f.readText(Charsets.UTF_8))
+
+        private fun stripBOM(s: String): String = if (s.startsWith("﻿")) s.substring(1) else s
 
         private fun indexer(header: List<String>): (String) -> Int? {
             val map = LinkedHashMap<String, Int>()

@@ -180,7 +180,7 @@ public struct Catalog: Sendable {
         var abNo = [String: InventoryItem]()
         var defName = [String: [InventoryItem]]()
         for it in items {
-            abNo[it.abNo.trimmingCharacters(in: .whitespaces)] = it
+            abNo[it.abNo.trimmingCharacters(in: .whitespacesAndNewlines)] = it
             defName[normKey(it.definitionName), default: []].append(it)
         }
         self.byAbNo = abNo
@@ -336,7 +336,7 @@ public extension Catalog {
             let name = r[cName].trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { continue }
             let links = r[cInv].split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
             defs.append(.init(
                 name: name,
                 target: r[cTarget].trimmingCharacters(in: .whitespacesAndNewlines),

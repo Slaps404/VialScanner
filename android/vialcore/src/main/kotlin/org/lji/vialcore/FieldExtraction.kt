@@ -1,5 +1,7 @@
 package org.lji.vialcore
 
+import java.util.regex.Pattern
+
 enum class LabelField { CATALOG, LOT, CLONE, VENDOR, CONCENTRATION, VOLUME, ISOTYPE }
 
 class BarcodePayload(val raw: String, val symbology: String) {
@@ -49,8 +51,23 @@ class BarcodePayload(val raw: String, val symbology: String) {
     }
 }
 
+/**
+ * A regex with Java's character classes widened to Unicode.
+ *
+ * Swift matches with `NSRegularExpression` (ICU), where `\b`, `\w` and `\s`
+ * are Unicode-aware; Java's defaults are ASCII-only. Without this flag a `µ`
+ * glued to a part number creates a word boundary on Android but not on iOS, so
+ * `BE0106µ` yields a catalog number on one platform and nothing on the other,
+ * and a non-breaking space silently defeats every `\s` in the keyword rules.
+ */
+internal fun urx(pattern: String, ignoreCase: Boolean = false): Regex {
+    var flags = Pattern.UNICODE_CHARACTER_CLASS
+    if (ignoreCase) flags = flags or Pattern.CASE_INSENSITIVE or Pattern.UNICODE_CASE
+    return Pattern.compile(pattern, flags).toRegex()
+}
+
 private class Rule(val field: LabelField, pattern: String, val group: Int = 1) {
-    val regex = Regex(pattern, RegexOption.IGNORE_CASE)
+    val regex = urx(pattern, ignoreCase = true)
 }
 
 /**
@@ -128,12 +145,12 @@ private val minLength = mapOf(LabelField.CATALOG to 5, LabelField.LOT to 4, Labe
 
 /** The one catalog shape short enough to trip the length floor and still be a
  *  real part number: Leinco prints `P362` and `C2855`. */
-private val shortCatalogException = Regex("""^[A-Z][0-9]{3}$""")
+private val shortCatalogException = urx("""^[A-Z][0-9]{3}$""")
 
 /** A curved Leinco row can expose `Prod. No.: C28` before the remaining digits
  *  rotate into view. Kept at low weight so Evidence can repair a later
  *  near-prefix (`C2355` -> `C2855`); it can never win alone. */
-private val partialCatalog = Regex("""^[A-Z][0-9]{2}$""")
+private val partialCatalog = urx("""^[A-Z][0-9]{2}$""")
 
 private fun isPlausible(field: LabelField, value: String): Boolean {
     val k = normKey(value)
@@ -169,17 +186,17 @@ private fun isPlausible(field: LabelField, value: String): Boolean {
 
 /** A keyword line with nothing usable after it - `Cat. No.`, `REF`, `LOT #`. */
 private val danglingKeywords: List<Pair<LabelField, Regex>> = listOf(
-    LabelField.CATALOG to Regex(
+    LabelField.CATALOG to urx(
         """(?:CAT(?:ALOG)?|PROD|PART|[RB]E[FEI])[A-Z]?\.?\s*(?:NO|N0|#)?\.?\s*[:#]?\s*$""",
-        RegexOption.IGNORE_CASE
+        ignoreCase = true
     ),
-    LabelField.LOT to Regex(
+    LabelField.LOT to urx(
         """LOT\.?\s*(?:NO|N0|#)?\.?\s*[:#]?\s*$""",
-        RegexOption.IGNORE_CASE
+        ignoreCase = true
     ),
 )
 
-private val identifierRun = Regex("""[A-Z0-9][A-Z0-9\-]{2,15}""")
+private val identifierRun = urx("""[A-Z0-9][A-Z0-9\-]{2,15}""")
 
 /**
  * The first identifier-shaped run in a neighbouring observation.
@@ -252,7 +269,7 @@ private class Shape(
 ) {
     // Deliberately case-sensitive, like the Swift original: `BE0106` is a shape,
     // `be0106` inside a word is not.
-    val regex = Regex(pattern)
+    val regex = urx(pattern)
 }
 
 private val shapes: List<Shape> = listOf(
@@ -261,7 +278,10 @@ private val shapes: List<Shape> = listOf(
     Shape(LabelField.CATALOG, """\b\d{2}-\d{4}-\d{2}\b""", 0.75),
     // The same number with the second hyphen lost to the curve: `14-491481`.
     Shape(LabelField.CATALOG, """\b\d{2}-\d{4}\d{2}\b""", 0.5, normalize = { v ->
-        val parts = v.split("-")
+        // Swift's `split(separator:)` drops empty fields, so a smudged `2020--11`
+    // is still a year-month there. Without the filter it reads as a catalog
+    // number on Android and an expiry date gets committed as a part number.
+    val parts = v.split("-").filter { it.isNotEmpty() }
         if (parts.size == 2 && parts[1].length == 6) {
             "${parts[0]}-${parts[1].take(4)}-${parts[1].takeLast(2)}"
         } else v
