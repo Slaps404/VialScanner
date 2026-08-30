@@ -33,13 +33,19 @@ class MlKitFrame(
     override val timestamp: Double,
     private val recognizer: TextRecognizer,
     private val scanner: BarcodeScanner,
+    /** Long edge, in pixels, the text pass wants its crop to be. Absolute on
+     *  purpose: a fixed fraction like "half the frame" compounds with whatever
+     *  resolution CameraX happens to hand in, so the same code would feed OCR
+     *  360px on one phone and 1000px on another. Exposed so the video replay
+     *  harness can sweep it. */
+    private val ocrLongEdge: Int = 1080,
 ) : VialFrame {
 
     override val sharpness: Double by lazy { laplacianVariance(bitmap) }
 
     override fun detectBarcodes(roi: NormRect?): List<BarcodePayload> {
         // Full resolution: decode rate collapses when a DataMatrix is downscaled.
-        val (crop, _) = cropped(roi, scale = 1.0)
+        val (crop, _) = cropped(roi, longEdge = 0)
         val result = runCatching {
             Tasks.await(scanner.process(InputImage.fromBitmap(crop, 0)))
         }.getOrNull() ?: return emptyList()
@@ -50,7 +56,7 @@ class MlKitFrame(
     }
 
     override fun recognizeText(roi: NormRect?): List<TextObservation> {
-        val (crop, rect) = cropped(roi, scale = 0.5)
+        val (crop, rect) = cropped(roi, longEdge = ocrLongEdge)
         val result = runCatching {
             Tasks.await(recognizer.process(InputImage.fromBitmap(crop, 0)))
         }.getOrNull() ?: return emptyList()
@@ -81,11 +87,12 @@ class MlKitFrame(
     private class Frac(val x: Double, val y: Double, val w: Double, val h: Double)
 
     /**
-     * Crop to the region of interest and optionally halve it. Returns the crop
-     * together with where it sits in the full frame, in top-left fractions, so
-     * boxes can be mapped back.
+     * Crop to the region of interest, then shrink it so its long edge is
+     * `longEdge` pixels (0 or a larger crop than that means: leave it alone -
+     * upscaling invents no detail). Returns the crop together with where it sits
+     * in the full frame, in top-left fractions, so boxes can be mapped back.
      */
-    private fun cropped(roi: NormRect?, scale: Double): Pair<Bitmap, Frac> {
+    private fun cropped(roi: NormRect?, longEdge: Int): Pair<Bitmap, Frac> {
         val frac = if (roi == null) Frac(0.0, 0.0, 1.0, 1.0)
         else Frac(roi.minX, 1.0 - roi.maxY, roi.width, roi.height)
 
@@ -95,10 +102,15 @@ class MlKitFrame(
         val h = (frac.h * bitmap.height).roundToInt().coerceIn(1, bitmap.height - top)
 
         var crop = Bitmap.createBitmap(bitmap, left, top, w, h)
+        val scale = if (longEdge <= 0) 1.0 else min(1.0, longEdge.toDouble() / max(w, h))
         if (scale < 1.0) {
             val sw = max(1, (w * scale).roundToInt())
             val sh = max(1, (h * scale).roundToInt())
-            crop = Bitmap.createScaledBitmap(crop, sw, sh, true)
+            val scaled = Bitmap.createScaledBitmap(crop, sw, sh, true)
+            // Never recycle the frame itself: a full-frame crop returns the
+            // same instance, and `sharpness` may still be waiting to read it.
+            if (scaled !== crop && crop !== bitmap) crop.recycle()
+            crop = scaled
         }
         return crop to Frac(frac.x, frac.y, frac.w, frac.h)
     }

@@ -9,3 +9,6 @@ android/local.properties
 android/.gradle/
 android/build/
 android/*/build/
+Videos/
+android/vialcore/bin/
+.vscode/

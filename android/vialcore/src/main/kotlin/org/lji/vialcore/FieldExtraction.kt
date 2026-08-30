@@ -61,9 +61,17 @@ class BarcodePayload(val raw: String, val symbology: String) {
  * and a non-breaking space silently defeats every `\s` in the keyword rules.
  */
 internal fun urx(pattern: String, ignoreCase: Boolean = false): Regex {
-    var flags = Pattern.UNICODE_CHARACTER_CLASS
-    if (ignoreCase) flags = flags or Pattern.CASE_INSENSITIVE or Pattern.UNICODE_CASE
-    return Pattern.compile(pattern, flags).toRegex()
+    var base = 0
+    if (ignoreCase) base = Pattern.CASE_INSENSITIVE or Pattern.UNICODE_CASE
+    return try {
+        Pattern.compile(pattern, base or Pattern.UNICODE_CHARACTER_CLASS).toRegex()
+    } catch (e: IllegalArgumentException) {
+        // Android throws "UNICODE_CHARACTER_CLASS flag not supported": its regex
+        // engine is ICU, the same one Swift uses, so the classes are already
+        // Unicode-aware and the flag is redundant there. The flag is only needed
+        // on the desktop JVM, where the parity harness runs.
+        Pattern.compile(pattern, base).toRegex()
+    }
 }
 
 private class Rule(val field: LabelField, pattern: String, val group: Int = 1) {

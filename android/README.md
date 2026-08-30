@@ -67,6 +67,38 @@ What this does *not* cover: `ScanEngine` pacing. A tape holds only the frames
 Swift's sharpness gate let through, so the skipped frames have nothing to
 replay. Pacing is the untested seam and needs synthetic frames.
 
+## Replaying whole videos on an emulator (the other half of the test)
+
+The tape replay holds OCR constant, which is what makes it a parity test and
+also what makes it blind to Google's OCR and to `ScanEngine`'s pacing.
+`app/src/androidTest/.../VideoReplayTest.kt` covers the rest: frames extracted
+on the host at 6 fps go through `MlKitFrame` exactly as CameraX would feed them,
+and it prints a verdict per clip. No camera, no phone.
+
+```bash
+# frames out of the recordings, 6 fps, native width
+for f in Videos/pixel/*.mp4; do n=$(basename "$f" .mp4)
+  ffmpeg -v error -i "$f" -vf "fps=6,scale=1080:-2" -q:v 3 "/tmp/frames/${n}_%03d.jpg" -y
+done
+
+$ANDROID_HOME/emulator/emulator -avd vialtest -no-window -no-audio -gpu swiftshader_indirect &
+adb push /tmp/frames/. /sdcard/Android/media/org.lji.vialscanner/frames/
+./gradlew installDebug installDebugAndroidTest
+adb shell am instrument -w -e frames frames -e ocrLongEdge 1080 \
+    -e class org.lji.vialscanner.VideoReplayTest \
+    org.lji.vialscanner.test/androidx.test.runner.AndroidJUnitRunner
+adb pull /sdcard/Android/media/org.lji.vialscanner/replay-frames-1080.txt
+```
+
+Frames must go in the *media* dir: under scoped storage an app cannot read what
+adb pushed into its own data dir.
+
+Where the two engines stand on identical footage (19 iPhone clips, same catalog):
+same verdict class on 18. On 20 Pixel clips Swift lands 3 hits to Android's 1;
+one miss is a clip where the sharpness gate passed only 2 of 12 frames to OCR,
+which is a pacing question rather than an OCR one. Most clips are `NOT_FOUND` on
+both engines because the vials in them are not in the shipped catalog.
+
 ## Deliberate divergences
 
 Swift iterates `Set`s and sorts unstably in `bestFuzzy`, in `vote()`'s repair
