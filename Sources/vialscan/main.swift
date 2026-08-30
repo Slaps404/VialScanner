@@ -9,7 +9,7 @@ import VialCore
 
 let args = Array(CommandLine.arguments.dropFirst())
 guard args.count >= 1 else {
-    FileHandle.standardError.write("usage: vialscan <dir-or-video...> [--defs P] [--inv P] [--bench]\n".data(using: .utf8)!)
+    FileHandle.standardError.write("usage: vialscan <dir-or-video...> [--defs P] [--inv P] [--bench] [--fixtures DIR]\n".data(using: .utf8)!)
     exit(2)
 }
 
@@ -18,6 +18,7 @@ var defsPath = "1. Antibody Definitions-Grid view.csv"
 var invPath = "2. Inventory Items-Grid view.csv"
 var bench = false
 var dump = false
+var fixturesDir: String? = nil
 var fps = 6.0
 var roiInset = 0.15
 var i = 0
@@ -27,6 +28,7 @@ while i < args.count {
     case "--inv":  i += 1; invPath = args[i]
     case "--bench": bench = true
     case "--dump": dump = true
+    case "--fixtures": i += 1; fixturesDir = args[i]
     case "--fps":  i += 1; fps = Double(args[i]) ?? 6.0
     case "--roi":  i += 1; roiInset = Double(args[i]) ?? 0.15
     default: paths.append(args[i])
@@ -77,6 +79,13 @@ func frames(of path: String, fps: Double) -> [(CGImage, Double)] {
     return out
 }
 
+/// Tabs and newlines would break the one-event-per-line tape format.
+func esc(_ s: String) -> String {
+    s.replacingOccurrences(of: "\\", with: "\\\\")
+     .replacingOccurrences(of: "\t", with: "\\t")
+     .replacingOccurrences(of: "\n", with: "\\n")
+}
+
 var hits = 0, misses = 0, newVials = 0
 var totalEngineTime = 0.0, totalFrames = 0
 
@@ -88,6 +97,27 @@ for v in videos {
                                       width: 1 - 2 * roiInset, height: 1 - 2 * (roiInset + 0.05))
     } else { cfg.regionOfInterest = nil }
     let engine = ScanEngine(catalog: catalog, config: cfg)
+
+    // Record exactly what fed the evidence buffer, in order, so the Kotlin port
+    // can replay the same observations and be compared on the pipeline rather
+    // than on whose OCR is better. One line per event; tabs separate columns and
+    // are stripped from the text, which never contains them anyway.
+    var tape: [String] = []
+    if fixturesDir != nil {
+        engine.onBarcode = { b in
+            tape.append("B\t\(b.symbology)\t\(esc(b.raw))")
+        }
+        engine.onOCRFrame = { obs in
+            tape.append("F")
+            for o in obs {
+                let b = o.boundingBox ?? .zero
+                tape.append(String(format: "T\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t",
+                                   Double(o.confidence), b.minX, b.minY, b.width, b.height)
+                            + esc(o.text))
+            }
+        }
+    }
+
     let fs = frames(of: v, fps: fps)
     var state: ScanState = .scanning(framesSeen: 0, ocrFrames: 0, views: 0, progress: 0, hint: "")
     var stoppedAt = fs.count
@@ -167,6 +197,17 @@ for v in videos {
         }
         print("    --- raw OCR lines ---")
         for line in ev.allText { print("    | \(line)") }
+    }
+    if let dir = fixturesDir {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        var out = tape
+        // The expected answer, so the replay knows what it is checking against.
+        out.append("R\t\(result.verdict.rawValue)\t\(engine.lastStandard == .corroborated ? "corroborated" : "best")"
+                   + "\t\(result.definition?.catalog ?? "")\t\(result.vial?.abNo ?? "")"
+                   + "\t\(result.lotNotOnRecord)\t\(result.evidenceLevel)"
+                   + "\t\(String(format: "%.4f", result.score))\t\(String(format: "%.4f", result.margin))")
+        let path = (dir as NSString).appendingPathComponent(name + ".tape")
+        try? out.joined(separator: "\n").write(toFile: path, atomically: true, encoding: .utf8)
     }
     print("")
 }

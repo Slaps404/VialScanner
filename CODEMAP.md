@@ -11,6 +11,8 @@ Sources/VialCore/   Engine. No UIKit/SwiftUI/AVFoundation import — pure logic,
 Sources/vialscan/   CLI harness that replays .MOV files through VialCore
                     (offline validation against sample videos, no camera).
 App/                iOS app (SwiftUI + AVFoundation). Depends on VialCore.
+android/            Android port: :vialcore (pure Kotlin engine, same logic) and
+                    :app (CameraX + ML Kit + Compose). See android/README.md.
 Resources/          definitions.csv + inventory.csv — the shipped catalog snapshot.
 ```
 
@@ -85,6 +87,17 @@ Airtable" for the exact rule per verdict.
 - Writes are local only — there is no sync back to Airtable; round-tripping
   means exporting CSV and re-importing there.
 
+## Android port
+
+`android/vialcore` is the same pipeline in Kotlin, with one structural fix: OCR
+and barcode decoding go through a `VialFrame` interface instead of the engine
+owning Vision requests, so the module has no Android SDK dependency at all.
+Parity is checked by replaying recorded observation tapes, not by re-running
+OCR: `vialscan --fixtures DIR` writes the exact observation stream that fed the
+Swift evidence buffer, and `ReplayParity` feeds it to the Kotlin one and
+compares verdicts (currently 43/43). `android/README.md` has the commands, the
+coordinate-origin hazard, and what the replay does not cover.
+
 ## Build surfaces — don't confuse these
 
 - **`App/` + `project.yml`** is the real iOS app. `project.yml` is an XcodeGen
@@ -103,6 +116,8 @@ Airtable" for the exact rule per verdict.
   videos.
 - `App/Models.swift`, `App/Store.swift`: type-checked against the macOS SDK
   (they only import Foundation + VialCore).
+- `android/vialcore`: compiles with kotlinc and passes the tape replay here.
+  `android/app` has never been built — no Android SDK or Gradle on this machine.
 - Everything importing SwiftUI/UIKit/AVFoundation (the rest of `App/`): parse-
   checked only, never built or run — this dev machine has no iOS SDK (no
   Xcode, CommandLineTools only). Expect first-build fixups in Xcode.

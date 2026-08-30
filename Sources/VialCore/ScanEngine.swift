@@ -133,6 +133,20 @@ public final class ScanEngine {
     private let barcodeRequest: VNDetectBarcodesRequest
     private var latestTextBoxes: [CGRect] = []
 
+    // ---- Offline capture hooks ------------------------------------------
+    //
+    // The only way to check that a second implementation of this pipeline (the
+    // Kotlin/ML Kit port) agrees with this one is to feed both the *same*
+    // observations. Re-running OCR on the Android side would compare two OCR
+    // engines, not two pipelines, and every disagreement would be unattributable.
+    // These fire exactly where the evidence buffer is fed, so a recording of
+    // them replays into an identical buffer.
+    /// Which standard produced the verdict the scan ended on. A replay has to
+    /// resolve the same way to be comparing like with like.
+    public private(set) var lastStandard: EvidenceStandard = .best
+    public var onBarcode: ((BarcodePayload) -> Void)?
+    public var onOCRFrame: (([TextObservation]) -> Void)?
+
     public init(catalog: Catalog, config: EngineConfig = EngineConfig()) {
         self.config = config
         self.matcher = Matcher(catalog: catalog, config: config.match)
@@ -184,7 +198,9 @@ public final class ScanEngine {
             try? handler.perform([barcodeRequest])
             for obs in barcodeRequest.results ?? [] {
                 guard let payload = obs.payloadStringValue, !payload.isEmpty else { continue }
-                evidence.addBarcode(BarcodePayload(raw: payload, symbology: obs.symbology.rawValue))
+                let bc = BarcodePayload(raw: payload, symbology: obs.symbology.rawValue)
+                evidence.addBarcode(bc)
+                onBarcode?(bc)
             }
             // A decoded barcode is the strongest evidence this engine can get,
             // but a single decode is a single glimpse — and a DataMatrix on a
@@ -194,6 +210,7 @@ public final class ScanEngine {
             if config.earlyExitOnBarcode, elapsed >= config.minScanDuration,
                evidence.hasConfirmedBarcode(minFrames: config.barcodeConfirmations) {
                 let r = matcher.resolve(evidence, standard: .corroborated)
+                lastStandard = .corroborated
                 switch r.verdict {
                 case .certain:
                     settled = r
@@ -246,11 +263,13 @@ public final class ScanEngine {
             }
             latestTextBoxes = obs.compactMap(\.boundingBox)
             evidence.addFrame(obs)
+            onOCRFrame?(obs)
 
             if ocrFrames >= config.earlyExitMinFrames,
                elapsed >= config.minScanDuration,
                coverageSatisfied {
                 let r = matcher.resolve(evidence, standard: .corroborated)
+                lastStandard = .corroborated
                 if r.verdict == .certain || r.verdict == .confident, confirmed(r) {
                     settled = r
                     return .finished(r)
@@ -260,6 +279,7 @@ public final class ScanEngine {
 
         if elapsed >= deadline {
             let r = matcher.resolve(evidence)
+            lastStandard = .best
             // Only stop on the deadline if there is something to stop *with*.
             if r.evidenceLevel == .sufficient
                 || extensionsGranted >= config.maxExtensions
@@ -348,6 +368,7 @@ public final class ScanEngine {
     public func finish() -> ScanResult {
         if let s = settled { return s }
         let r = matcher.resolve(evidence)
+        lastStandard = .best
         settled = r
         return r
     }
