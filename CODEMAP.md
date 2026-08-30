@@ -41,7 +41,7 @@ Frame in → evidence out → match → verdict. Read in this order:
 
 `Sources/vialscan/main.swift` drives this same pipeline over recorded video
 instead of a live camera feed — it's the fast way to check a change against the
-52 sample videos without touching the app.
+sample videos without touching the app.
 
 ## App layer
 
@@ -101,26 +101,30 @@ coordinate-origin hazard, and what the replay does not cover.
 ## Build surfaces — don't confuse these
 
 - **`App/` + `project.yml`** is the real iOS app. `project.yml` is an XcodeGen
-  spec (bundle id `com.lab.vyals`) that generates `VialScanner.xcodeproj`.
+  spec (bundle id `com.lab.vyals`) whose `name:` is `Vyals`, so it generates
+  `Vyals.xcodeproj` - the same path as the stale scaffold below. Generate it
+  out of tree (`xcodegen generate --project /tmp/iosproj --project-root "$PWD"`)
+  or you overwrite a tracked file.
 - **`Vials/` + `Vyals.xcodeproj`** is an unrelated, unused default Xcode
   template scaffold (SwiftData `Item` model, no VialCore dependency) left over
   from initial setup. Do not add app features there.
 - **`Package.swift`** describes `VialCore` + `vialscan` for SwiftPM/Xcode, but
-  `build-cli.sh` compiles the CLI directly with `swiftc` because SwiftPM's
-  manifest step needs a full Xcode install (CommandLineTools alone isn't
-  enough).
+  `build-cli.sh` compiles the CLI directly with `swiftc`. That predates Xcode
+  being installed here; it still works and is faster, so it stays.
 
 ## Build status (know before you assume something compiles)
 
-- `VialCore` + `vialscan` CLI: compiles and is validated against all 52 sample
-  videos.
-- `App/Models.swift`, `App/Store.swift`: type-checked against the macOS SDK
-  (they only import Foundation + VialCore).
+- `VialCore` + `vialscan` CLI: compiles, validated against the sample clips (README's results tables
+  were run against an older 52-clip corpus; `Videos/` now holds 39).
+- `App/`: builds clean against the iOS 26.5 SDK, both as raw `swiftc -wmo`
+  over `App/*.swift` and as a full `Vyals.app` bundle via xcodegen +
+  `xcodebuild`. See CLAUDE.md for the exact commands. Never run on a real
+  device, so camera behaviour (autofocus, thermals, torch) is unverified.
 - `android/vialcore`: compiles and passes the tape replay here (43/43).
-- `android/app`: assembles (`./gradlew assembleDebug`) and lints clean, but has
-  never run on a device — no screen in it has been QA'd.
-- Everything importing SwiftUI/UIKit/AVFoundation (the rest of `App/`): parse-
-  checked only, never built or run — this dev machine has no iOS SDK (no
-  Xcode, CommandLineTools only). Expect first-build fixups in Xcode.
+- `android/app`: assembles, lints clean, and has been QA'd on the emulator -
+  all seven tabs render, the catalog loads, and CameraX + ML Kit run live
+  against the emulator's synthetic scene. Instrumented video replay agrees
+  with Swift on 36/39 clips (see `android/README.md` for the three that
+  differ). Not yet run on real hardware.
 
 See README.md for full validation results, thresholds, and known gaps.
