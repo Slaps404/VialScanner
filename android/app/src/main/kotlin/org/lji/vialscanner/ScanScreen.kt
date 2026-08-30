@@ -1,6 +1,7 @@
 package org.lji.vialscanner
 
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -79,12 +80,18 @@ fun ScanScreen(store: AppStore, controller: ScanController, granted: Boolean) {
             // The reticle is not decoration: recognition is restricted to it, so
             // it is drawn where the region of interest actually is.
             val inset = store.settings.roiInset.toFloat().coerceIn(0f, 0.4f)
+            // Doubled, dark outside white, for the same reason the chips carry
+            // their own ground: a single white hairline is invisible against a
+            // white vial label, which is the one thing this box is always
+            // drawn over.
             Box(
                 Modifier
                     .fillMaxWidth(1f - 2 * inset)
                     .fillMaxHeight(1f - 2.6f * inset)
                     .align(Alignment.Center)
-                    .border(2.dp, Color.White.copy(alpha = 0.6f))
+                    .border(4.dp, Color.Black.copy(alpha = 0.35f))
+                    .padding(2.dp)
+                    .border(2.dp, Color.White.copy(alpha = 0.85f))
             )
         } else {
             EmptyState("Camera permission is needed to scan vials.")
@@ -96,15 +103,14 @@ fun ScanScreen(store: AppStore, controller: ScanController, granted: Boolean) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             val box = store.activeSessionBox
-            AssistChip(
-                onClick = { showSessionBox = true },
-                label = { Text(box ?: "Set box") },
-            )
+            // These sit on top of the camera, whose brightness is whatever the
+            // user is pointing at. A default AssistChip is a transparent
+            // container with dim grey text, which disappears entirely against a
+            // pale label or a lit bench, so both chips carry their own dark
+            // ground rather than borrowing the preview's.
+            OverlayChip(box ?: "Set box") { showSessionBox = true }
             Spacer(Modifier.weight(1f))
-            AssistChip(
-                onClick = { controller.toggleTorch() },
-                label = { Text(if (controller.torchOn) "Torch on" else "Torch") },
-            )
+            OverlayChip(if (controller.torchOn) "Torch on" else "Torch") { controller.toggleTorch() }
         }
 
         flash?.let {
@@ -305,3 +311,14 @@ fun draftFrom(store: AppStore, r: ScanResult): ItemRecord = ItemRecord(
     box = store.activeSessionBox ?: store.settings.defaultBox,
     owner = store.settings.defaultOwner,
 )
+
+/** A chip legible over an arbitrary camera image. */
+@Composable
+private fun OverlayChip(label: String, onClick: () -> Unit) {
+    AssistChip(
+        onClick = onClick,
+        label = { Text(label, color = Ink.text) },
+        colors = AssistChipDefaults.assistChipColors(containerColor = Ink.bg.copy(alpha = 0.72f)),
+        border = BorderStroke(1.dp, Ink.text.copy(alpha = 0.45f)),
+    )
+}

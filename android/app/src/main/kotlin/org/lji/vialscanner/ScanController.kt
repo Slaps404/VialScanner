@@ -2,11 +2,14 @@ package org.lji.vialscanner
 
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.util.Rational
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import android.util.Size
@@ -107,8 +110,35 @@ class ScanController(private val store: AppStore) {
                 .build()
             analysis.setAnalyzer(analysisExecutor) { proxy -> analyze(proxy) }
 
+            // Preview and analysis must see the same field, or the reticle is a
+            // lie. They do not by default: the analysis stream comes back at
+            // whatever aspect the sensor offers (4:3 on the emulator) while
+            // PreviewView.FILL_CENTER crops that to the shape of the screen.
+            // Measured on a 1080x2400 display with a 1392x1856 upright buffer,
+            // the preview showed the middle 60% of the frame's width - so a
+            // reticle drawn at 0.15..0.85 of the screen sat over 0.29..0.71 of
+            // what the engine actually read, and the engine was free to read a
+            // neighbouring vial the user had deliberately framed out.
+            //
+            // A ViewPort is CameraX's answer: it puts the same crop rect on
+            // every use case in the group. `uprightBitmap` then has to honour
+            // `proxy.cropRect`, which is where that rect arrives.
+            // The provider callback usually lands after layout, but nothing
+            // promises it: an unmeasured view would set a 1:1 viewport and crop
+            // the analysis stream to a square. Fall back to the window.
+            val vw = if (view.width > 0) view.width else ctx.resources.displayMetrics.widthPixels
+            val vh = if (view.height > 0) view.height else ctx.resources.displayMetrics.heightPixels
+            val viewPort = ViewPort.Builder(Rational(vw, vh), preview.targetRotation)
+                .setScaleType(ViewPort.FILL_CENTER)
+                .build()
+            val group = UseCaseGroup.Builder()
+                .setViewPort(viewPort)
+                .addUseCase(preview)
+                .addUseCase(analysis)
+                .build()
+
             provider.unbindAll()
-            camera = provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+            camera = provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, group)
             if (store.settings.torchOnByDefault) {
                 torchOn = true
                 camera?.cameraControl?.enableTorch(true)
@@ -139,7 +169,16 @@ class ScanController(private val store: AppStore) {
     /** Rotate into display orientation: the region of interest is expressed
      *  relative to what the user is aiming with, not to the sensor. */
     private fun uprightBitmap(proxy: ImageProxy): Bitmap {
-        val bmp = proxy.toBitmap()
+        var bmp = proxy.toBitmap()
+        // The ViewPort's crop rect: the part of the buffer the preview is also
+        // showing. Cropping to it is what makes the on-screen reticle mean the
+        // same thing as `EngineConfig.regionOfInterest`.
+        val r = proxy.cropRect
+        if (r.width() in 1 until bmp.width || r.height() in 1 until bmp.height) {
+            val cropped = Bitmap.createBitmap(bmp, r.left, r.top, r.width(), r.height())
+            if (cropped !== bmp) bmp.recycle()
+            bmp = cropped
+        }
         val deg = proxy.imageInfo.rotationDegrees
         if (deg == 0) return bmp
         val m = Matrix().apply { postRotate(deg.toFloat()) }
