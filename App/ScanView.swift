@@ -18,6 +18,7 @@ struct ScanView: View {
     @EnvironmentObject private var store: AppStore
 
     @State private var showNewVial = false
+    @State private var showSessionBox = false
     @State private var newVialDraft = ItemRecord(abNo: "")
     @State private var keepClip = false
     @State private var countdown: Double = 0
@@ -61,6 +62,9 @@ struct ScanView: View {
                camera.permission == .authorized {
                 beginScan()
             }
+        }
+        .sheet(isPresented: $showSessionBox) {
+            SessionBoxSheet().environmentObject(store)
         }
         .sheet(isPresented: $showNewVial) {
             NewVialSheet(draft: $newVialDraft) { saved in
@@ -156,6 +160,8 @@ struct ScanView: View {
                 .buttonStyle(PressScale())
             }
 
+            sessionBoxButton
+
             Spacer()
 
             if camera.isRecording {
@@ -185,6 +191,26 @@ struct ScanView: View {
             }
         }
         .padding(.top, 6)
+    }
+
+    /// Always visible, because a stamp nobody can see is a stamp nobody can
+    /// correct. Filled white while it is stamping, an outline while it is not.
+    @ViewBuilder
+    private var sessionBoxButton: some View {
+        if let box = store.activeSessionBox {
+            Button { showSessionBox = true } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "shippingbox.fill").font(.system(size: 12, weight: .bold))
+                    Text(box).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                }
+                .foregroundStyle(.black)
+                .padding(.horizontal, 12).frame(height: 34)
+                .background(Capsule().fill(Color.white))
+            }
+            .buttonStyle(PressScale())
+        } else {
+            GlassCircleIcon(systemName: "shippingbox", size: 34) { showSessionBox = true }
+        }
     }
 
     // MARK: - Bottom
@@ -486,8 +512,13 @@ struct ScanView: View {
         }
         let record = store.log(built)
 
+        var filed: String? = nil
         if let abNo = overrideAbNo ?? result.vial?.abNo {
             store.markConfirmed(abNo: abNo, scanID: record.id)
+            // Confirming means someone is holding the tube. If they told us
+            // which box they are working through, that is the moment we know
+            // where it lives — better evidence than anything on the label.
+            filed = store.stampSessionBox(abNo: abNo)
             if let audit = store.openAudit {
                 if audit.expected.contains(abNo) {
                     store.recordFound(abNo, in: audit.id, method: "scan", scanID: record.id)
@@ -501,7 +532,9 @@ struct ScanView: View {
             }
         }
         Haptics.commit()
-        store.banner = AppStore.Banner(text: bannerText(for: result, abNo: overrideAbNo))
+        var text = bannerText(for: result, abNo: overrideAbNo)
+        if let filed { text += " · filed to \(filed)" }
+        store.banner = AppStore.Banner(text: text)
         afterCommit()
     }
 
@@ -547,7 +580,9 @@ struct ScanView: View {
         draft.concentration = result.fields[.concentration] ?? ""
         draft.owner = store.settings.defaultOwner
         draft.location = store.settings.defaultLocation
-        draft.box = store.settings.defaultBox
+        // A vial received mid-run belongs in the box being worked through, not
+        // in whatever the receiving default says.
+        draft.box = store.activeSessionBox ?? store.settings.defaultBox
         draft.vialName = result.definition?.name ?? (result.fields[.catalog].map { "Cat \($0)" } ?? "")
         draft.notes = receivingNote(result)
         newVialDraft = draft

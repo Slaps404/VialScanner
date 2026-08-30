@@ -257,6 +257,15 @@ struct AppSettings: Codable {
     var defaultOwner: String = ""
     var defaultLocation: String = ""
     var defaultBox: String = ""
+    /// The box currently being worked through. Every vial confirmed while this
+    /// is set gets stamped with it, which is the only realistic way the Box
+    /// column ever gets filled in: it is 11% populated in the Airtable export
+    /// and nobody is going to backfill 120 rows by hand.
+    var sessionBox: String = ""
+    /// When `sessionBox` was set. A box left over from last week must not
+    /// silently re-file today's vials, so `AppStore.activeSessionBox` ignores
+    /// anything older than `sessionBoxTTL`.
+    var sessionBoxSetAt: Date? = nil
     /// Camera optics and focus tracking
     var preferUltraWideZoom: Bool = true
     var autoTextFocus: Bool = true

@@ -122,6 +122,42 @@ final class AppStore: ObservableObject {
     var locations: [String] { unique(items.map(\.location)) }
     var owners: [String] { unique(items.map(\.owner)) }
 
+    // MARK: - Session box
+
+    /// A box set more than this long ago is treated as stale and stops
+    /// stamping. The failure it prevents is quiet and expensive: yesterday's
+    /// box silently re-filing today's vials, discovered only at the next audit.
+    static let sessionBoxTTL: TimeInterval = 12 * 3600
+
+    /// The box being worked through right now, or nil if none is set or the
+    /// one that is set has gone stale.
+    var activeSessionBox: String? {
+        let box = settings.sessionBox.trimmingCharacters(in: .whitespaces)
+        guard !box.isEmpty else { return nil }
+        guard let at = settings.sessionBoxSetAt,
+              Date().timeIntervalSince(at) < AppStore.sessionBoxTTL else { return nil }
+        return box
+    }
+
+    func setSessionBox(_ box: String) {
+        let trimmed = box.trimmingCharacters(in: .whitespaces)
+        settings.sessionBox = trimmed
+        settings.sessionBoxSetAt = trimmed.isEmpty ? nil : Date()
+    }
+
+    /// Stamp the active session box onto a vial that was just physically seen.
+    /// Returns the box only when it actually changed something, so the caller
+    /// can say so in the banner instead of claiming a filing that already held.
+    @discardableResult
+    func stampSessionBox(abNo: String) -> String? {
+        guard let box = activeSessionBox,
+              let idx = items.firstIndex(where: { $0.abNo == abNo }),
+              items[idx].box != box else { return nil }
+        items[idx].box = box
+        commit()
+        return box
+    }
+
     private func unique(_ xs: [String]) -> [String] {
         Array(Set(xs.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty })).sorted {
             $0.localizedStandardCompare($1) == .orderedAscending
