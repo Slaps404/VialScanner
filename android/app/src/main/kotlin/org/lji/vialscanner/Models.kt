@@ -243,6 +243,8 @@ data class AppSettings(
     /** Anything below the auto-commit bar goes to the review queue instead of
      *  stopping the line. */
     var handsFreeParksUncertain: Boolean = true,
+    /** Says the AbNo and box out loud, digit by digit - see `Speaker.phrase`. */
+    var speak: Boolean = true,
     var haptics: Boolean = true,
     var torchOnByDefault: Boolean = false,
     /** Steer focus at the label text instead of at the middle of the frame. */

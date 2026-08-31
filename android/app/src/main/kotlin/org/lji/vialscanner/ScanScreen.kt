@@ -92,6 +92,17 @@ fun ScanScreen(
         if (idle && store.settings.handsFree) { delay(400); controller.rescan() }
     }
 
+    // A result landing is worth a buzz whether or not hands-free is on - it is
+    // the same moment `App/ScanView.swift`'s `handleResult()` fires
+    // `Haptics.result`. Speaking it out loud, though, is hands-free only: with
+    // the phone in hand the result card already says everything out loud reads.
+    LaunchedEffect(state) {
+        val s = state
+        if (s !is ScanState.Finished) return@LaunchedEffect
+        Haptics.result(s.result.verdict)
+        if (store.settings.handsFree) Speaker.say(Speaker.phrase(s.result))
+    }
+
     // Hands-free: commit the verdict on its own after a beat. The delay is not
     // cosmetic - it is the window in which a wrong answer can still be caught by
     // the person holding the vial.
@@ -128,6 +139,7 @@ fun ScanScreen(
                     .pointerInput(Unit) {
                         detectTapGestures { p ->
                             controller.focusAt(p.x / size.width, p.y / size.height)
+                            Haptics.tap()
                         }
                     }
                     .pointerInput(Unit) {
@@ -172,7 +184,7 @@ fun ScanScreen(
                     onReceive = { receiving = draftFrom(store, state.result) },
                     onRescan = { controller.rescan() },
                 )
-                idle -> IdleControls(store) { controller.rescan() }
+                idle -> IdleControls(store) { Haptics.commit(); controller.rescan() }
                 else -> ScanningControls(state as ScanState.Scanning) {
                     controller.finishNow()
                 }
@@ -210,6 +222,7 @@ fun ScanScreen(
                 }
                 receiving = null
                 flash = "Received AbNo ${saved.abNo}"
+                Haptics.commit()
                 controller.rescan()
             },
         )
@@ -335,6 +348,12 @@ private fun BoxScope.FocusRing(point: Pair<Float, Float>?, locked: Boolean) {
  * The lens stops this phone offers. Hidden when there is only one, so a phone
  * without an ultra-wide shows no dead control.
  */
+private fun zoomLabel(z: Float): String =
+    // Whole stops read as "1x"; the wide lens is whatever this phone's sensor
+    // actually gives, so it is shown to one decimal rather than rounded to a
+    // number the hardware does not have.
+    if (z >= 1f && z == z.toInt().toFloat()) "${z.toInt()}x" else "%.1fx".format(z)
+
 @Composable
 private fun ZoomBar(controller: ScanController) {
     if (controller.zoomOptions.size < 2) return
@@ -348,14 +367,14 @@ private fun ZoomBar(controller: ScanController) {
         for (z in controller.zoomOptions) {
             val on = kotlin.math.abs(controller.zoomRatio - z) < 0.1f
             Text(
-                if (z < 1f) "${'$'}{z}x" else "${'$'}{z.toInt()}x",
+                zoomLabel(z),
                 color = if (on) Color.Black else Color.White,
                 fontSize = Type.caption,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier
                     .clip(CircleShape)
                     .background(if (on) Color.White else Color.Transparent)
-                    .clickable { controller.setZoom(z) }
+                    .clickable { controller.setZoom(z); Haptics.tap() }
                     .padding(horizontal = 11.dp, vertical = 7.dp),
             )
         }
@@ -393,13 +412,13 @@ private fun TopBar(
         GlassCircleIcon(
             if (controller.focusLocked) Icons.Filled.Lock else Icons.Filled.LockOpen,
             active = controller.focusLocked,
-        ) { controller.toggleFocusLock() }
+        ) { controller.toggleFocusLock(); Haptics.tap() }
         Spacer(Modifier.width(10.dp))
 
         GlassCircleIcon(
             if (controller.torchOn) Icons.Filled.FlashOn else Icons.Filled.FlashOff,
             active = controller.torchOn,
-        ) { controller.toggleTorch() }
+        ) { controller.toggleTorch(); Haptics.tap() }
     }
 }
 
@@ -438,7 +457,15 @@ private fun IdleControls(store: AppStore, onScan: () -> Unit) {
             GlassCircleIcon(
                 if (store.settings.handsFree) Icons.Filled.GraphicEq else Icons.Filled.TouchApp,
                 size = 50.dp, active = store.settings.handsFree,
-            ) { store.updateSettings { c -> c.copy(handsFree = !c.handsFree) } }
+            ) {
+                Haptics.tap()
+                val turningOn = !store.settings.handsFree
+                store.updateSettings { c -> c.copy(handsFree = turningOn) }
+                // Announced with force = true: the mode itself changing is worth
+                // a word even with "speak results" off, same as Swift's
+                // `Speaker.shared.say("Hands-free on", force: true)`.
+                if (turningOn) Speaker.say("Hands-free on", force = true) else Speaker.stop()
+            }
 
             Spacer(Modifier.width(14.dp))
             Shutter(onScan)
@@ -666,6 +693,7 @@ private fun confirm(store: AppStore, r: ScanResult): String {
     store.markConfirmed(abNo, logged.id)
     val filed = store.stampSessionBox(abNo)
     if (open != null) store.recordFound(abNo, open.id, method = "scan", scanID = logged.id)
+    Haptics.commit()
     var text = "Confirmed AbNo $abNo"
     if (filed != null) text += " · filed to $filed"
     if (open != null) text += " · counted in ${open.title}"
@@ -674,6 +702,7 @@ private fun confirm(store: AppStore, r: ScanResult): String {
 
 private fun park(store: AppStore, r: ScanResult) {
     store.log(record(r, ScanOutcome.REVIEW))
+    Haptics.commit()
     // A scan the audit could not name is still evidence that something was in
     // the drawer, so record it as an unexpected item rather than dropping it.
     val open = store.openAudit

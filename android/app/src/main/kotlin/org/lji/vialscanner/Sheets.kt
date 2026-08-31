@@ -42,12 +42,12 @@ fun SessionBoxSheet(store: AppStore, onDismiss: () -> Unit) {
             )
             Spacer(Modifier.height(16.dp))
             Button(
-                onClick = { store.setSessionBox(box); onDismiss() },
+                onClick = { store.setSessionBox(box); Haptics.commit(); onDismiss() },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Start stamping") }
             Spacer(Modifier.height(6.dp))
             OutlinedButton(
-                onClick = { store.setSessionBox(""); onDismiss() },
+                onClick = { store.setSessionBox(""); Haptics.tap(); onDismiss() },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Stop stamping") }
             Spacer(Modifier.height(24.dp))
@@ -125,13 +125,17 @@ fun VialSheet(store: AppStore, item: ItemRecord, onDismiss: () -> Unit) {
             }
 
             Spacer(Modifier.height(16.dp))
-            Button(onClick = { store.updateVial(d); onDismiss() }, modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = { store.updateVial(d); Haptics.commit(); onDismiss() },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text("Save")
             }
             Spacer(Modifier.height(6.dp))
             OutlinedButton(
                 onClick = {
                     store.markConfirmed(d.abNo, null)
+                    Haptics.commit()
                     onDismiss()
                 },
                 modifier = Modifier.fillMaxWidth(),

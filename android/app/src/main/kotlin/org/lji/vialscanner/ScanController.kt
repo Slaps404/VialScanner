@@ -2,6 +2,8 @@ package org.lji.vialscanner
 
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.os.Handler
+import android.os.Looper
 import android.util.Rational
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -70,7 +72,11 @@ class ScanController(private val store: AppStore) {
 
     /** Paused between scans so a finished result is not overwritten by the next
      *  frame before the user has acted on it. */
-    var running by mutableStateOf(true)
+    // Starts false: the app opens on a viewfinder, but opening a viewfinder is
+    // not the same as asking a question. iOS idles until the shutter is pressed,
+    // and an app that begins reading the room on launch burns battery, heats the
+    // phone before the first real scan, and logs frames nobody asked for.
+    var running by mutableStateOf(false)
         private set
 
     var torchOn by mutableStateOf(false)
@@ -115,6 +121,7 @@ class ScanController(private val store: AppStore) {
     private var previewView: PreviewView? = null
     private var lastAutoFocus = 0L
     private var lastFocusTarget: Pair<Double, Double>? = null
+    private val main = Handler(Looper.getMainLooper())
 
     private var camera: Camera? = null
     private var engine: ScanEngine? = null
@@ -220,8 +227,17 @@ class ScanController(private val store: AppStore) {
             val z = cam.cameraInfo.zoomState.value
             minZoom = z?.minZoomRatio ?: 1f
             maxZoom = (z?.maxZoomRatio ?: 1f).coerceAtMost(10f)
-            zoomOptions = listOf(0.5f, 1f, 2f).filter { it in minZoom..maxZoom }
-                .ifEmpty { listOf(1f) }
+            // Swift can hardcode 0.5x because every iPhone with a wide lens
+            // puts it exactly there. Android cannot: the Pixel 5a's back camera
+            // reports a range of 0.615..7.0, so a hardcoded 0.5 is filtered out
+            // as unreachable and the phone silently loses the one lens that can
+            // focus close enough to read a vial. Take the widest stop the sensor
+            // actually offers instead.
+            zoomOptions = buildList {
+                if (minZoom < 0.9f) add(minZoom)
+                add(1f)
+                if (maxZoom >= 2f) add(2f)
+            }
 
             // Ultra-wide focuses far closer than the main lens - around 2 cm
             // against 10 - which is the whole reason to prefer it here. It is a
@@ -243,15 +259,7 @@ class ScanController(private val store: AppStore) {
      * and wrong for the lock button.
      */
     fun focusAt(fx: Float, fy: Float, lock: Boolean = false) {
-        val view = previewView ?: return
-        val cam = camera ?: return
-        val pt = view.meteringPointFactory.createPoint(fx * view.width, fy * view.height)
-        val action = FocusMeteringAction.Builder(
-            pt, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
-        ).apply {
-            if (lock) disableAutoCancel() else setAutoCancelDuration(4, TimeUnit.SECONDS)
-        }.build()
-        runCatching { cam.cameraControl.startFocusAndMetering(action) }
+        aimAt(fx, fy, lock)
         focusPoint = fx to fy
         focusLocked = lock
     }
@@ -310,14 +318,25 @@ class ScanController(private val store: AppStore) {
         lastAutoFocus = now
         lastFocusTarget = cx to cy
 
+        // `PreviewView.getMeteringPointFactory` asserts the main thread, and
+        // this runs on CameraX's analysis executor, so reading it here throws
+        // IllegalStateException and takes the app down on the first frame that
+        // finds text. Hop threads; the point is stale by a frame either way,
+        // which does not matter for something already throttled to seconds.
+        main.post { aimAt(cx.toFloat(), cy.toFloat(), lock = true) }
+    }
+
+    /** Build a metering point from view fractions and send it. Main thread only. */
+    private fun aimAt(fx: Float, fy: Float, lock: Boolean) {
         val view = previewView ?: return
         val cam = camera ?: return
-        val pt = view.meteringPointFactory.createPoint(
-            cx.toFloat() * view.width, cy.toFloat() * view.height,
-        )
+        if (view.width == 0 || view.height == 0) return
+        val pt = view.meteringPointFactory.createPoint(fx * view.width, fy * view.height)
         val action = FocusMeteringAction.Builder(
             pt, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
-        ).disableAutoCancel().build()
+        ).apply {
+            if (lock) disableAutoCancel() else setAutoCancelDuration(4, TimeUnit.SECONDS)
+        }.build()
         runCatching { cam.cameraControl.startFocusAndMetering(action) }
     }
 

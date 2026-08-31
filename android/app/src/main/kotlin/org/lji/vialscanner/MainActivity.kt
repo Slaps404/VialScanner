@@ -73,12 +73,18 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         store = AppStore(applicationContext)
         controller = ScanController(store)
+        // Both need a real Context handed in once before anything calls them -
+        // see the class doc in Feedback.kt for why that differs from iOS.
+        Haptics.init(applicationContext)
+        Speaker.init(applicationContext)
+        Haptics.enabled = store.settings.haptics
+        Speaker.enabled = store.settings.speak
 
         refreshCameraPermission()
         if (!hasCamera) permission.launch(Manifest.permission.CAMERA)
 
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme(background = Ink.bg, surface = Ink.card)) {
+            VialTheme {
                 AppRoot(
                     store = store,
                     controller = controller,
@@ -120,11 +126,8 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         controller.shutdown()
+        Speaker.shutdown()
     }
-}
-
-private enum class Tab(val label: String) {
-    SCAN("Scan"), INVENTORY("Vials"), REVIEW("Review"), AUDIT("Audit"), HISTORY("History"), DATA("Data"), SETTINGS("Setup")
 }
 
 @Composable
@@ -137,63 +140,47 @@ private fun AppRoot(
     onPickBackup: () -> Unit,
     onShare: (File) -> Unit,
 ) {
-    var tab by remember { mutableStateOf(Tab.SCAN) }
+    var route by remember { mutableStateOf(Route.SCAN) }
+    var menuOpen by remember { mutableStateOf(false) }
 
-    // The camera keeps running behind other tabs only while a scan is live;
+    // The camera keeps running behind other screens only while a scan is live;
     // leaving the scanner mid-rotation would otherwise silently commit a verdict
     // built from frames of a drawer.
-    LaunchedEffect(tab) { if (tab != Tab.SCAN) controller.pause() else controller.rescan() }
+    // Leaving the scanner stops the analyser; coming back does not restart it.
+    // iOS idles until the shutter is pressed, and an app that starts reading the
+    // room the moment you close the drawer burns battery and logs frames nobody
+    // asked for.
+    LaunchedEffect(route) { if (route != Route.SCAN) controller.pause() }
 
-    Scaffold(
-        containerColor = Ink.bg,
-        bottomBar = {
-            NavigationBar(containerColor = Ink.card) {
-                for (t in Tab.entries) {
-                    val badge = when (t) {
-                        Tab.REVIEW -> store.reviewQueue.size
-                        Tab.AUDIT -> store.openAudit?.missing?.size ?: 0
-                        else -> 0
-                    }
-                    NavigationBarItem(
-                        selected = tab == t,
-                        onClick = { tab = t },
-                        icon = {
-                            if (badge > 0) BadgedBox(badge = { Badge { Text(badge.toString()) } }) { Text(t.label, fontSize = 11.sp) }
-                            else Text(t.label, fontSize = 11.sp)
-                        },
-                    )
-                }
-            }
-        },
-    ) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize().background(Ink.bg)) {
-            when (tab) {
-                Tab.SCAN -> Column(Modifier.fillMaxSize()) {
-                    if (!hasCamera) {
-                        Column(Modifier.padding(16.dp)) {
-                            Text("Camera permission is needed to scan vials.", color = Ink.text)
-                            Spacer(Modifier.height(8.dp))
-                            Button(onClick = onRequestCamera) { Text("Grant permission") }
-                        }
-                    }
-                    ScanScreen(store, controller, hasCamera)
-                }
-                Tab.INVENTORY -> InventoryScreen(store)
-                Tab.REVIEW -> ReviewScreen(store)
-                Tab.AUDIT -> AuditScreen(store)
-                Tab.HISTORY -> HistoryScreen(store)
-                Tab.DATA -> DataScreen(store, onPickCSVs, onPickBackup, onShare)
-                Tab.SETTINGS -> SettingsScreen(store)
+    // Mirrors Swift's `.onChange(of: store.settings.haptics)` /
+    // `.onChange(of: store.settings.speak)` in RootView.swift: the toggle in
+    // Settings only edits the store, something still has to push the new value
+    // into the plain (non-Composable) objects that actually fire feedback.
+    LaunchedEffect(store.settings.haptics) { Haptics.enabled = store.settings.haptics }
+    LaunchedEffect(store.settings.speak) { Speaker.enabled = store.settings.speak }
+
+    AppShell(
+        store = store,
+        route = route,
+        open = menuOpen,
+        onOpenChange = { menuOpen = it },
+        onRoute = { route = it },
+    ) {
+        Box(Modifier.fillMaxSize().background(Ink.bg)) {
+            val openMenu = { menuOpen = true }
+            when (route) {
+                Route.SCAN -> ScanScreen(store, controller, hasCamera, openMenu, onRequestCamera)
+                Route.INVENTORY -> InventoryScreen(store, openMenu)
+                Route.REVIEW -> ReviewScreen(store, openMenu)
+                Route.AUDIT -> AuditScreen(store, openMenu)
+                Route.HISTORY -> HistoryScreen(store, openMenu)
+                Route.DATA -> DataScreen(store, openMenu, onPickCSVs, onPickBackup, onShare)
+                Route.SETTINGS -> SettingsScreen(store, openMenu)
             }
 
             store.banner?.let { b ->
                 LaunchedEffect(b.id) { delay(4000); if (store.banner?.id == b.id) store.banner = null }
-                Surface(
-                    color = if (b.isError) Ink.bad else Ink.good,
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
-                ) {
-                    Text(b.text, color = Color.Black, modifier = Modifier.padding(12.dp))
-                }
+                Banner(b)
             }
         }
     }

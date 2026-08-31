@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Haptics. Install-time, not runtime, so there is no prompt: without it
+         every vibrate throws SecurityException and takes the app down with it,
+         which is exactly what happened the first time the feedback port ran. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-feature android:name="android.hardware.camera.any" android:required="true" />
 
     <application

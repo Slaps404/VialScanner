@@ -139,6 +139,7 @@ fun ReviewScreen(store: AppStore, openMenu: () -> Unit) {
                     // one: the vial is marked seen only if the scan named one.
                     s.abNo?.let { store.markConfirmed(it, s.id) }
                     store.resolveReview(s, ScanOutcome.CONFIRMED)
+                    Haptics.commit()
                     open = null
                 }) { Text("Confirm", color = Ink.text, fontWeight = Type.labelWeight) }
             },
@@ -169,10 +170,10 @@ fun HistoryScreen(store: AppStore, openMenu: () -> Unit) {
                 .padding(horizontal = Metric.pad)
                 .horizontalScroll(rememberScrollState()),
         ) {
-            Pill("All", filter == null) { filter = null }
+            Pill("All", filter == null) { filter = null; Haptics.tap() }
             for (o in ScanOutcome.entries) {
                 Spacer(Modifier.width(8.dp))
-                Pill(o.label, filter == o) { filter = if (filter == o) null else o }
+                Pill(o.label, filter == o) { filter = if (filter == o) null else o; Haptics.tap() }
             }
         }
         Spacer(Modifier.height(4.dp))
@@ -216,7 +217,7 @@ fun AuditScreen(store: AppStore, openMenu: () -> Unit) {
             Mono("${open.foundSet.size} found · ${open.missing.size} missing · ${open.extras.size} unexpected")
             Spacer(Modifier.height(14.dp))
             Row {
-                PrimaryButton("Finish", Modifier.weight(1f)) { store.finishAudit(open.id) }
+                PrimaryButton("Finish", Modifier.weight(1f)) { store.finishAudit(open.id); Haptics.commit() }
                 Spacer(Modifier.width(10.dp))
                 SecondaryButton("Export CSV", Modifier.weight(1f)) {
                     store.exportAuditCSV(open)?.let { store.banner = AppStore.Banner("Wrote ${it.name}") }
@@ -237,6 +238,7 @@ fun AuditScreen(store: AppStore, openMenu: () -> Unit) {
                 onClick = {
                     if (found) store.unmarkFound(abNo, open.id)
                     else store.recordFound(abNo, open.id, method = "manual", scanID = null)
+                    Haptics.tap()
                 },
             )
         }
@@ -266,6 +268,8 @@ private fun NewAuditPanel(store: AppStore) {
             Spacer(Modifier.height(14.dp))
             PrimaryButton("Start", enabled = expected.isNotEmpty()) {
                 store.startAudit(scope, value, "${scope.label} $value".trim())
+                Haptics.commit()
+                Speaker.say("Check started. ${expected.size} vials expected.")
             }
         }
 
@@ -325,7 +329,10 @@ fun DataScreen(
 
 @Composable
 private fun ExportRow(label: String, onClick: () -> Unit) {
-    SecondaryButton(label, Modifier.fillMaxWidth().padding(vertical = 4.dp), onClick)
+    // iOS builds the file on one tap (Haptics.tap()) and shares it on a second;
+    // this collapses both into one tap, so the one buzz iOS gives the first tap
+    // is the whole feedback there is.
+    SecondaryButton(label, Modifier.fillMaxWidth().padding(vertical = 4.dp)) { onClick(); Haptics.tap() }
 }
 
 // ---- Settings --------------------------------------------------------------
@@ -342,6 +349,12 @@ fun SettingsScreen(store: AppStore, openMenu: () -> Unit) {
                     "Scans start on their own and confident reads commit without a tap.",
                     s.handsFree,
                 ) { store.updateSettings { c -> c.copy(handsFree = it) } }
+
+                ToggleRow(
+                    "Speak results",
+                    "Says the AbNo and box out loud, digit by digit.",
+                    s.speak,
+                ) { store.updateSettings { c -> c.copy(speak = it) } }
 
                 SliderRow(
                     "Pause before committing",
@@ -424,6 +437,11 @@ fun SettingsScreen(store: AppStore, openMenu: () -> Unit) {
                     "The wide lens focuses about 2 cm away against roughly 10 for the main one.",
                     s.preferUltraWideZoom,
                 ) { store.updateSettings { c -> c.copy(preferUltraWideZoom = it) } }
+                ToggleRow(
+                    "Haptics",
+                    "A different buzz for identified, unsure, and new.",
+                    s.haptics,
+                ) { store.updateSettings { c -> c.copy(haptics = it) } }
             }
             Spacer(Modifier.height(Metric.pad))
         }
