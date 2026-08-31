@@ -236,6 +236,32 @@ struct AuditSession: Codable, Identifiable, Hashable {
     }
 }
 
+// MARK: - Field provenance
+//
+// A receiving form prefilled from a scan is a mix of certainties: a barcode
+// decode is ground truth, an OCR read is a guess that is usually right, and a
+// remembered default is neither — it is just what was true last time. The
+// operator needs to see which is which at a glance, without the form turning
+// into a spreadsheet of confidence scores.
+enum FieldSource: String {
+    case barcode, ocr, remembered
+
+    var glyph: String {
+        switch self {
+        case .barcode:    return "barcode.viewfinder"
+        case .ocr:        return "text.viewfinder"
+        case .remembered: return "clock.arrow.circlepath"
+        }
+    }
+    var label: String {
+        switch self {
+        case .barcode:    return "From barcode"
+        case .ocr:        return "Read from label"
+        case .remembered: return "Last used"
+        }
+    }
+}
+
 // MARK: - Settings
 
 struct AppSettings: Codable {

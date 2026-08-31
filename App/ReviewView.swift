@@ -76,6 +76,8 @@ struct ReviewDetail: View {
     @State private var linking = false
     @State private var receiving = false
     @State private var draft = ItemRecord(abNo: "")
+    @State private var prefillDef: DefRecord? = nil
+    @State private var sources: [String: FieldSource] = [:]
 
     init(record: ScanRecord) {
         self.record = record
@@ -156,9 +158,37 @@ struct ReviewDetail: View {
                             draft = ItemRecord(abNo: store.nextAbNo())
                             draft.definitionName = record.definitionName ?? ""
                             draft.lot = record.lot ?? ""
+                            var s: [String: FieldSource] = [:]
+                            if let lot = record.lot, !lot.isEmpty {
+                                s["Lot"] = record.barcode != nil ? .barcode : .ocr
+                            }
                             draft.owner = store.settings.defaultOwner
+                            if !draft.owner.isEmpty { s["Owner"] = .remembered }
                             draft.location = store.settings.defaultLocation
-                            draft.box = store.settings.defaultBox
+                            if !draft.location.isEmpty { s["Location"] = .remembered }
+                            draft.box = store.activeSessionBox ?? store.settings.defaultBox
+                            if !draft.box.isEmpty { s["Box"] = .remembered }
+
+                            // A parked scan already logged catalog/vendor/clone
+                            // separately from `definitionName`, so a review that
+                            // never matched a definition still has enough to
+                            // offer one instead of a blank name field.
+                            if record.definitionName == nil || record.definitionName?.isEmpty == true {
+                                let catalog = record.catalog ?? ""
+                                let clone = record.clone ?? ""
+                                let vendor = record.vendor ?? ""
+                                if !catalog.isEmpty || !clone.isEmpty || !vendor.isEmpty {
+                                    if !catalog.isEmpty { s["Catalog #"] = record.barcode != nil ? .barcode : .ocr }
+                                    if !clone.isEmpty { s["Clone"] = .ocr }
+                                    if !vendor.isEmpty { s["Vendor"] = .ocr }
+                                    var name = [vendor, clone.isEmpty ? nil : "Clone \(clone)"]
+                                        .compactMap { $0 }.joined(separator: " ")
+                                    if name.isEmpty { name = "Cat \(catalog)" }
+                                    prefillDef = DefRecord(name: name, clone: clone, vendor: vendor,
+                                                            catalog: catalog, isLocal: true)
+                                }
+                            }
+                            sources = s
                             receiving = true
                         }
                         Pill(title: "Dismiss — nothing to do", icon: "xmark", kind: .quiet) {
@@ -206,7 +236,7 @@ struct ReviewDetail: View {
                 .environmentObject(store)
             }
             .sheet(isPresented: $receiving) {
-                NewVialSheet(draft: $draft) { saved in
+                NewVialSheet(draft: $draft, prefillDefinition: prefillDef, sources: sources) { saved in
                     var r = record
                     r.abNo = saved.abNo
                     r.definitionName = saved.definitionName

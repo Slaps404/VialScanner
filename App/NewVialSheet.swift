@@ -9,6 +9,16 @@ import VialCore
 /// about the lot, and the person holding the tube can see both.
 struct NewVialSheet: View {
     @Binding var draft: ItemRecord
+    /// A definition built from the same scan, offered up front rather than
+    /// waiting for someone to notice "this antibody is not on file either".
+    /// NEW VIAL is the common case (31 of 39 clips in the sample set end
+    /// here), so the definition step opens automatically instead of being a
+    /// second screen the operator has to go looking for.
+    var prefillDefinition: DefRecord? = nil
+    /// Where each prefilled value came from, keyed by the same title strings
+    /// used on `LabeledField`. Missing entries render with no badge, which is
+    /// what a value the operator typed themselves should look like.
+    var sources: [String: FieldSource] = [:]
     let onSave: (ItemRecord) -> Void
 
     @EnvironmentObject private var store: AppStore
@@ -17,6 +27,7 @@ struct NewVialSheet: View {
     @State private var pickingDefinition = false
     @State private var creatingDefinition = false
     @State private var newDef = DefRecord(name: "")
+    @State private var offeredPrefill = false
 
     var body: some View {
         NavigationStack {
@@ -58,8 +69,8 @@ struct NewVialSheet: View {
                             SectionLabel(text: "Vial")
                             LabeledField(title: "AbNo", text: $draft.abNo, mono: true)
                             LabeledField(title: "Vial name", text: $draft.vialName)
-                            LabeledField(title: "Lot", text: $draft.lot, mono: true)
-                            LabeledField(title: "Concentration", text: $draft.concentration)
+                            LabeledField(title: "Lot", text: $draft.lot, mono: true, source: sources["Lot"])
+                            LabeledField(title: "Concentration", text: $draft.concentration, source: sources["Concentration"])
                             LabeledField(title: "Status", text: $draft.status)
                         }
                     }
@@ -67,9 +78,9 @@ struct NewVialSheet: View {
                     Card {
                         VStack(alignment: .leading, spacing: 12) {
                             SectionLabel(text: "Where it lives")
-                            SuggestField(title: "Location", text: $draft.location, options: store.locations)
-                            SuggestField(title: "Box", text: $draft.box, options: store.boxes)
-                            SuggestField(title: "Owner", text: $draft.owner, options: store.owners)
+                            SuggestField(title: "Location", text: $draft.location, options: store.locations, source: sources["Location"])
+                            SuggestField(title: "Box", text: $draft.box, options: store.boxes, source: sources["Box"])
+                            SuggestField(title: "Owner", text: $draft.owner, options: store.owners, source: sources["Owner"])
                         }
                     }
 
@@ -114,12 +125,21 @@ struct NewVialSheet: View {
                 .environmentObject(store)
             }
             .sheet(isPresented: $creatingDefinition) {
-                NewDefinitionSheet(def: $newDef) { saved in
+                NewDefinitionSheet(def: $newDef, sources: sources) { saved in
                     let added = store.addDefinition(saved)
                     draft.definitionName = added.name
                     if draft.vialName.isEmpty { draft.vialName = added.name }
                 }
                 .environmentObject(store)
+            }
+            .onAppear {
+                // NEW VIAL is the main path (most scans end here), so the
+                // definition step opens by itself instead of waiting for
+                // someone to find "this antibody is not on file either".
+                guard !offeredPrefill, let prefillDefinition, draft.definitionName.isEmpty else { return }
+                offeredPrefill = true
+                newDef = prefillDefinition
+                creatingDefinition = true
             }
         }
     }
@@ -197,6 +217,7 @@ struct DefinitionPicker: View {
 
 struct NewDefinitionSheet: View {
     @Binding var def: DefRecord
+    var sources: [String: FieldSource] = [:]
     let onSave: (DefRecord) -> Void
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
@@ -210,11 +231,11 @@ struct NewDefinitionSheet: View {
                             SectionLabel(text: "Definition")
                             LabeledField(title: "Name", text: $def.name)
                             LabeledField(title: "Target", text: $def.target)
-                            LabeledField(title: "Clone", text: $def.clone)
+                            LabeledField(title: "Clone", text: $def.clone, source: sources["Clone"])
                             LabeledField(title: "Host", text: $def.host)
-                            LabeledField(title: "Isotype", text: $def.isotype)
-                            LabeledField(title: "Vendor", text: $def.vendor)
-                            LabeledField(title: "Catalog #", text: $def.catalog, mono: true)
+                            LabeledField(title: "Isotype", text: $def.isotype, source: sources["Isotype"])
+                            LabeledField(title: "Vendor", text: $def.vendor, source: sources["Vendor"])
+                            LabeledField(title: "Catalog #", text: $def.catalog, mono: true, source: sources["Catalog #"])
                         }
                     }
                     Notice(text: "New definitions are matched by catalog number on the next scan, so get that field right even if the rest is blank.",
@@ -247,10 +268,23 @@ struct LabeledField: View {
     let title: String
     @Binding var text: String
     var mono: Bool = false
+    /// Where this value came from, if it was prefilled rather than typed.
+    /// A barcode read is ground truth; an OCR read or a remembered default
+    /// is a guess worth a second look. Once the operator edits the field the
+    /// caller stops passing a source, and the badge goes away on its own.
+    var source: FieldSource? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(Theme.caption).foregroundStyle(Theme.textSecond)
+            HStack(spacing: 5) {
+                Text(title).font(Theme.caption).foregroundStyle(Theme.textSecond)
+                if let source {
+                    Image(systemName: source.glyph)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(source == .barcode ? Theme.accent : Theme.textFaint)
+                        .help(source.label)
+                }
+            }
             TextField("", text: $text)
                 .font(mono ? Theme.mono : Theme.body)
                 .autocorrectionDisabled()
@@ -266,10 +300,11 @@ struct SuggestField: View {
     let title: String
     @Binding var text: String
     let options: [String]
+    var source: FieldSource? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            LabeledField(title: title, text: $text)
+            LabeledField(title: title, text: $text, source: source)
             if !options.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
