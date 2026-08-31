@@ -403,7 +403,7 @@ struct ResultCard: View {
                 }
 
                 HStack(spacing: 10) {
-                    Pill(title: "Review later — keep clip", icon: "clock.badge.exclamationmark",
+                    Pill(title: "Review clip", icon: "clock.badge.exclamationmark",
                          kind: .quiet) { onPark() }
                     if canConfirm {
                         Pill(title: "New vial", icon: "plus", kind: .tinted, wide: false) { onReceive() }

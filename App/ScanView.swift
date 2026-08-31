@@ -386,7 +386,7 @@ struct ScanView: View {
     private var autoLabel: String? {
         switch autoAction {
         case .confirm: return "Saving"
-        case .park:    return "Parking for review"
+        case .park:    return "Saving for review"
         case .rescan:  return "Next vial"
         case nil:      return nil
         }
@@ -556,7 +556,7 @@ struct ScanView: View {
         store.log(makeRecord(result, outcome: .review, clip: clip))
         Haptics.commit()
         store.banner = AppStore.Banner(
-            text: clip == nil ? "Parked for review (no clip was recorded)" : "Parked for review with clip")
+            text: clip == nil ? "Saved for review (no clip was recorded)" : "Saved for review with clip")
         afterCommit()
     }
 

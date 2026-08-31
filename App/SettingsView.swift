@@ -96,7 +96,7 @@ struct SettingsView: View {
                 .tint(Theme.accent)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    settingLabel("Delete clips after", "Parked scans keep theirs until they are resolved.")
+                    settingLabel("Delete clips after", "Saved scans keep theirs until they are resolved.")
                     HStack(spacing: 8) {
                         ForEach([0, 7, 30, 90], id: \.self) { days in
                             Button {
