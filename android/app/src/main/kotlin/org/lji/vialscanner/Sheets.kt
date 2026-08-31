@@ -8,6 +8,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.lji.vialcore.normKey
 
 /**
  * Set the box being worked through.
@@ -86,6 +87,130 @@ fun ReceiveSheet(
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Add to inventory") }
             Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+/**
+ * What "Wrong match" opens onto.
+ *
+ * A rejected reading with no correction attached teaches the matcher nothing -
+ * it just says "wrong" without saying what right looks like. So the three
+ * real answers are each one tap away: pick the vial, say it's not on file
+ * (routes straight into the existing receiving flow), or admit nobody knows.
+ * The last one has to be exactly as fast as a plain reject button, because it
+ * is the one the operator reaches for constantly - a labelling flow that
+ * makes "I don't know" cost more than a tap trains people to guess instead.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun RejectSheet(
+    store: AppStore,
+    // Other vials of the same antibody the matcher already ranked and
+    // rejected itself - shown before search so the common case, right
+    // antibody wrong lot, is one tap rather than a retype of something the
+    // engine already knew.
+    rankedCandidates: List<org.lji.vialcore.InventoryItem>,
+    onDismiss: () -> Unit,
+    onPickItem: (ItemRecord) -> Unit,
+    onPickDefinition: (DefRecord) -> Unit,
+    onNotOnFile: () -> Unit,
+    onDontKnow: () -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    val items = remember(query, store.items) {
+        val q = normKey(query)
+        if (q.isEmpty()) emptyList()
+        else store.items.filter {
+            normKey(it.abNo).contains(q) || normKey(it.definitionName).contains(q) ||
+                normKey(it.vialName).contains(q) || normKey(it.lot).contains(q)
+        }.sortedBy { it.abNo.toIntOrNull() ?: 0 }.take(20)
+    }
+    val defs = remember(query, store.defs) {
+        val q = normKey(query)
+        if (q.isEmpty()) emptyList()
+        else store.defs.filter {
+            normKey(it.name).contains(q) || normKey(it.catalog).contains(q) ||
+                normKey(it.clone).contains(q) || normKey(it.target).contains(q)
+        }.take(20)
+    }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Ink.card) {
+        Column(
+            Modifier.padding(16.dp).heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
+        ) {
+            Text("What was it actually?", color = Ink.text, fontSize = 20.sp)
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SecondaryButton("Not on file", Modifier.weight(1f)) { onDismiss(); onNotOnFile() }
+                SecondaryButton("Don't know", Modifier.weight(1f)) { onDismiss(); onDontKnow() }
+            }
+            Spacer(Modifier.height(10.dp))
+            SearchField("AbNo, antibody, catalog #…", query) { query = it }
+            Spacer(Modifier.height(10.dp))
+
+            if (rankedCandidates.isNotEmpty()) {
+                Text("Other vials of this antibody", color = Ink.textSecond, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                for (v in rankedCandidates) {
+                    ListRow(
+                        title = "AbNo ${v.abNo} · ${v.vialName.ifEmpty { v.definitionName }}",
+                        subtitle = listOfNotNull(
+                            v.lot.takeIf { it.isNotEmpty() }?.let { "Lot $it" },
+                            v.box.takeIf { it.isNotEmpty() },
+                        ).joinToString(" · "),
+                        onClick = { store.item(v.abNo)?.let(onPickItem); onDismiss() },
+                    )
+                    Spacer(Modifier.height(6.dp))
+                }
+                Spacer(Modifier.height(4.dp))
+            }
+
+            if (items.isNotEmpty()) {
+                Text("Vials on record", color = Ink.textSecond, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                for (item in items) {
+                    ListRow(
+                        title = "AbNo ${item.abNo} · ${item.displayName}",
+                        subtitle = listOfNotNull(
+                            item.lot.takeIf { it.isNotEmpty() }?.let { "Lot $it" },
+                            item.box.takeIf { it.isNotEmpty() },
+                        ).joinToString(" · "),
+                        onClick = { onPickItem(item); onDismiss() },
+                    )
+                    Spacer(Modifier.height(6.dp))
+                }
+                Spacer(Modifier.height(4.dp))
+            }
+
+            if (defs.isNotEmpty()) {
+                Text("Antibodies (no specific vial)", color = Ink.textSecond, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                for (def in defs) {
+                    ListRow(
+                        title = def.name,
+                        subtitle = listOfNotNull(
+                            def.vendor.takeIf { it.isNotEmpty() },
+                            def.catalog.takeIf { it.isNotEmpty() },
+                        ).joinToString(" · "),
+                        onClick = { onPickDefinition(def); onDismiss() },
+                    )
+                    Spacer(Modifier.height(6.dp))
+                }
+            }
+
+            if (query.isEmpty() && rankedCandidates.isEmpty()) {
+                Text(
+                    "Type to search inventory and antibody definitions.",
+                    color = Ink.dim, fontSize = 12.sp,
+                )
+            } else if (query.isNotEmpty() && items.isEmpty() && defs.isEmpty()) {
+                Text("No matches.", color = Ink.dim, fontSize = 12.sp)
+            }
+
+            Spacer(Modifier.height(10.dp))
             OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
             Spacer(Modifier.height(24.dp))
         }

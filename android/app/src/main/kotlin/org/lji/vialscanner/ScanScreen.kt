@@ -89,6 +89,7 @@ fun ScanScreen(
         if (caption != null) { delay(1400); caption = null }
     }
     var receiving by remember { mutableStateOf<ItemRecord?>(null) }
+    var rejecting by remember { mutableStateOf(false) }
     var flash by remember { mutableStateOf<String?>(null) }
 
     val state = controller.state
@@ -201,6 +202,7 @@ fun ScanScreen(
                     onPark = { park(store, state.result); flash = "Saved for review"; controller.rescan() },
                     onReceive = { receiving = draftFrom(store, state.result) },
                     onRescan = { controller.rescan() },
+                    onReject = { rejecting = true },
                 )
                 idle -> IdleControls(store, tip) { Haptics.commit(); controller.rescan() }
                 else -> ScanningControls(state as ScanState.Scanning) {
@@ -244,6 +246,38 @@ fun ScanScreen(
                 controller.rescan()
             },
         )
+    }
+
+    if (rejecting) {
+        val s = controller.state
+        if (s is ScanState.Finished) {
+            RejectSheet(
+                store = store,
+                rankedCandidates = s.result.otherVials,
+                onDismiss = { rejecting = false },
+                onPickItem = { item ->
+                    reject(store, s.result, trueAbNo = item.abNo)
+                    rejecting = false
+                    controller.rescan()
+                },
+                onPickDefinition = { def ->
+                    reject(store, s.result, trueCatalog = def.catalog)
+                    rejecting = false
+                    controller.rescan()
+                },
+                onNotOnFile = {
+                    rejecting = false
+                    receiving = draftFrom(store, s.result)
+                },
+                onDontKnow = {
+                    reject(store, s.result)
+                    rejecting = false
+                    controller.rescan()
+                },
+            )
+        } else {
+            rejecting = false
+        }
     }
 }
 
@@ -646,6 +680,7 @@ private fun ResultPanel(
     onPark: () -> Unit,
     onReceive: () -> Unit,
     onRescan: () -> Unit,
+    onReject: () -> Unit,
 ) {
     // The result is a themed card on the camera, not another glass overlay: once
     // there is an answer to read the page stops being a viewfinder.
@@ -712,6 +747,13 @@ private fun ResultPanel(
                 SecondaryButton("Review later", Modifier.weight(1f), onPark)
                 SecondaryButton("Receive", Modifier.weight(1f), onReceive)
             }
+            // A proposed match is exactly what needs a first-class no - a
+            // labelling session lives or dies on how cheap this is to reach.
+            // NOT_FOUND has no proposal to reject, so it stays off this card.
+            if (r.verdict != Verdict.NOT_FOUND) {
+                Spacer(Modifier.height(10.dp))
+                SecondaryButton("Wrong match", Modifier.fillMaxWidth(), onReject)
+            }
         }
     }
 }
@@ -775,6 +817,17 @@ private fun park(store: AppStore, r: ScanResult) {
             open.id,
         )
     }
+}
+
+/**
+ * A rejected scan is worth logging because someone looked at a verdict and
+ * disagreed with it. A scan that read nothing carries no verdict to disagree
+ * with, and logging it only fills the history with blank rows.
+ */
+private fun reject(store: AppStore, r: ScanResult, trueAbNo: String? = null, trueCatalog: String? = null) {
+    if (r.readNothing) return
+    store.log(record(r, ScanOutcome.REJECTED).copy(trueAbNo = trueAbNo, trueCatalog = trueCatalog))
+    Haptics.commit()
 }
 
 /** Pre-fill a receive form from what the scan read. */
