@@ -37,8 +37,16 @@ class MlKitFrame(
      *  purpose: a fixed fraction like "half the frame" compounds with whatever
      *  resolution CameraX happens to hand in, so the same code would feed OCR
      *  360px on one phone and 1000px on another. Exposed so the video replay
-     *  harness can sweep it. */
-    private val ocrLongEdge: Int = 1080,
+     *  harness can sweep it.
+     *
+     *  1152, not 1080, because that is where the downscale stops happening at
+     *  all: a 1080x1920 frame cropped to the 0.70x0.60 ROI is 756x1152, and on
+     *  the Pixel 5a the post-ViewPort analysis frame (916x1920) crops to
+     *  641x1152. Swept over the 39-clip corpus, 1080 -> 1152 turned one clip
+     *  from NOT_FOUND into a correct read and cost nothing measurable
+     *  (140-154 ms per frame across 576/810/1080/1152, no trend). Going higher
+     *  buys nothing: `cropped` never upscales. */
+    private val ocrLongEdge: Int = 1152,
 ) : VialFrame {
 
     override val sharpness: Double by lazy { laplacianVariance(bitmap) }
