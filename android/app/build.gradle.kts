@@ -35,6 +35,7 @@ dependencies {
     implementation("androidx.camera:camera-camera2:$camerax")
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
+    implementation("androidx.camera:camera-video:$camerax")
 
     // On-device, bundled: no Play Services download, no network, same offline
     // guarantee the iOS app makes with Vision.

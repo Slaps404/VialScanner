@@ -544,14 +544,14 @@ class AppStore(private val context: Context) {
         val rows = ArrayList<List<String>>()
         rows.add(listOf(
             "When", "Verdict", "Outcome", "AbNo", "Antibody", "Catalog", "Lot",
-            "Barcode", "Score", "Margin", "Frames", "Lot not on record", "Note", "Why",
+            "Barcode", "Score", "Margin", "Frames", "Lot not on record", "Clip", "Note", "Why",
         ))
         for (s in scans) {
             rows.add(listOf(
                 stamp(s.date), s.verdict, s.outcome.name, s.abNo ?: "",
                 s.definitionName ?: "", s.catalog ?: "", s.lot ?: "", s.barcode ?: "",
                 "%.1f".format(s.score), "%.1f".format(s.margin),
-                s.framesUsed.toString(), if (s.lotNotOnRecord) "yes" else "",
+                s.framesUsed.toString(), if (s.lotNotOnRecord) "yes" else "", s.clipFile ?: "",
                 s.note, s.reasons.joinToString("; "),
             ))
         }

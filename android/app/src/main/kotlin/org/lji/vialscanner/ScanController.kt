@@ -1,5 +1,6 @@
 package org.lji.vialscanner
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.Handler
@@ -30,7 +31,9 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import org.lji.vialcore.NormRect
 import org.lji.vialcore.ScanEngine
+import org.lji.vialcore.ScanResult
 import org.lji.vialcore.ScanState
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -42,9 +45,10 @@ import java.util.concurrent.TimeUnit
  * the catalog as it was before an import is the kind of wrong that looks like a
  * bad read.
  */
-class ScanController(private val store: AppStore) {
+class ScanController(private val store: AppStore, context: Context) {
 
     private val analysisExecutor = Executors.newSingleThreadExecutor()
+    private val clipRecorder = ClipRecorder(context)
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     /**
      * The same seven symbologies Swift asks Vision for
@@ -127,6 +131,42 @@ class ScanController(private val store: AppStore) {
     private var engine: ScanEngine? = null
     private var engineStamp: String = ""
 
+    // ---- Clips -------------------------------------------------------------
+    // Whether this scan wants its video kept is decided once, at the shutter -
+    // see `ScanScreen`'s `startNextScan`, mirroring Swift's `beginScan()`.
+
+    private var recordingClip = false
+
+    /** Set if binding Preview + ImageAnalysis + VideoCapture together threw on
+     *  this device. ImageAnalysis is non-negotiable, so clips are what gives. */
+    var clipRecordingUnsupported by mutableStateOf(false)
+        private set
+
+    /** The file `finishNow`/auto-finish just handed back, waiting on the
+     *  operator's decision. Null once consumed or discarded, same shape as
+     *  Swift's `CameraController.pendingClip`. */
+    var pendingClip by mutableStateOf<File?>(null)
+        private set
+
+    /** Frames the last *completed* scan saw, captured off the last `Scanning`
+     *  state before it turned `Finished` - by the time a result exists, the
+     *  engine has already discarded them. Feeds `ClipMetadata.capture`. */
+    var lastFramesSeen = 0
+        private set
+    var lastOcrFrames = 0
+        private set
+
+    fun consumePendingClip(): File? {
+        val f = pendingClip
+        pendingClip = null
+        return f
+    }
+
+    fun discardPendingClip() {
+        ClipRecorder.discard(pendingClip)
+        pendingClip = null
+    }
+
     private fun idle() = ScanState.Scanning(0, 0, 0, 0.0, "Line the label up")
 
     private fun currentEngine(): ScanEngine {
@@ -142,7 +182,13 @@ class ScanController(private val store: AppStore) {
         return fresh
     }
 
-    fun rescan() {
+    /**
+     * Start a fresh scan. `recordClip` is decided by the caller once, up front
+     * - `keepClip` toggle, "always keep", or hands-free - because a decision
+     * made mid-scan would mean stitching two files together for one result.
+     */
+    fun rescan(recordClip: Boolean = false) {
+        discardPendingClip()
         currentEngine().reset()
         state = idle()
         running = true
@@ -150,6 +196,19 @@ class ScanController(private val store: AppStore) {
         // and would be the first thing tracking autofocus steered at.
         textBoxes = emptyList()
         lastFocusTarget = null
+        lastFramesSeen = 0
+        lastOcrFrames = 0
+        recordingClip = recordClip && !clipRecordingUnsupported
+        if (recordingClip) clipRecorder.start()
+    }
+
+    /** Abandon the scan in progress: no result, no clip. */
+    fun cancelScan() {
+        if (recordingClip) { clipRecorder.cancel(); recordingClip = false }
+        discardPendingClip()
+        state = idle()
+        running = false
+        textBoxes = emptyList()
     }
 
     fun pause() { running = false }
@@ -210,11 +269,28 @@ class ScanController(private val store: AppStore) {
                 .setViewPort(viewPort)
                 .addUseCase(preview)
                 .addUseCase(analysis)
+                .addUseCase(clipRecorder.useCase)
                 .build()
 
             provider.unbindAll()
             previewView = view
-            val cam = provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, group)
+            // Preview + ImageAnalysis + VideoCapture is three use cases on one
+            // camera; CameraX silently trims a combination the hardware cannot
+            // run rather than throwing, and ImageAnalysis is what the whole app
+            // is for. If bindToLifecycle instead throws (a device that will not
+            // run the trio at all), fall back to the two the engine cannot do
+            // without and drop clip recording for this session.
+            val cam = try {
+                provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, group)
+            } catch (e: IllegalArgumentException) {
+                clipRecordingUnsupported = true
+                val fallback = UseCaseGroup.Builder()
+                    .setViewPort(viewPort)
+                    .addUseCase(preview)
+                    .addUseCase(analysis)
+                    .build()
+                provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, fallback)
+            }
             camera = cam
             if (store.settings.torchOnByDefault) {
                 torchOn = true
@@ -349,7 +425,12 @@ class ScanController(private val store: AppStore) {
                 recognizer = recognizer,
                 scanner = scanner,
             )
-            state = currentEngine().ingest(frame)
+            val s = currentEngine().ingest(frame)
+            if (s is ScanState.Scanning) {
+                lastFramesSeen = s.framesSeen
+                lastOcrFrames = s.ocrFrames
+            }
+            if (s is ScanState.Finished) deliverFinished(s.result) else state = s
             // Only when the frame was actually read. The engine skips OCR on a
             // blurred frame, and treating that silence as "no text here" would
             // blink the overlay off and drop the focus target at exactly the
@@ -366,7 +447,25 @@ class ScanController(private val store: AppStore) {
 
     /** Force a verdict from whatever has been read (the user stopped rotating). */
     fun finishNow() {
-        state = ScanState.Finished(currentEngine().finish())
+        deliverFinished(currentEngine().finish())
+    }
+
+    /**
+     * A scan just ended, one way or another. If it was recording, the clip has
+     * to be finalised before the result card appears - `Recording.stop()`
+     * completes asynchronously, and a card offering to keep a clip that is not
+     * on disk yet is a promise the app cannot keep.
+     */
+    private fun deliverFinished(result: ScanResult) {
+        if (!recordingClip) {
+            state = ScanState.Finished(result)
+            return
+        }
+        recordingClip = false
+        clipRecorder.finish { file ->
+            pendingClip = file
+            state = ScanState.Finished(result)
+        }
     }
 
     /** Rotate into display orientation: the region of interest is expressed
@@ -392,6 +491,8 @@ class ScanController(private val store: AppStore) {
     }
 
     fun shutdown() {
+        if (recordingClip) clipRecorder.cancel()
+        discardPendingClip()
         analysisExecutor.shutdown()
         recognizer.close()
         scanner.close()
