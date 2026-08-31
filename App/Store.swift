@@ -534,9 +534,13 @@ final class AppStore: ObservableObject {
     }
 
     func exportScanLogCSV() -> URL? {
+        // New columns go on the end, not woven into the middle: anything that
+        // still parses this file by position (a spreadsheet, an old script)
+        // keeps working against a scan log made before rejection existed.
         var rows: [[String]] = [[
             "When", "Verdict", "Outcome", "AbNo", "Antibody", "Catalog", "Lot",
             "Barcode", "Score", "Margin", "Frames", "Lot not on record", "Clip", "Note", "Why",
+            "True AbNo", "True catalog",
         ]]
         for s in scans {
             rows.append([
@@ -545,6 +549,7 @@ final class AppStore: ObservableObject {
                 String(format: "%.1f", s.score), String(format: "%.1f", s.margin),
                 String(s.framesUsed), s.lotNotOnRecord ? "yes" : "", s.clipFile ?? "",
                 s.note, s.reasons.joined(separator: "; "),
+                s.trueAbNo ?? "", s.trueCatalog ?? "",
             ])
         }
         return write(rows, name: "scan-log-\(Self.fileStamp()).csv")

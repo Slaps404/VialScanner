@@ -162,6 +162,15 @@ struct ScanRecord: Codable, Identifiable, Hashable {
     var note: String = ""
     var auditID: UUID? = nil
     var resolvedAt: Date? = nil
+    /// Set only on a rejected scan where the operator identified the real
+    /// vial. Nil either means the scan wasn't rejected, or it was rejected
+    /// with the truth unknown - "don't know" has to stay a real answer, not
+    /// something indistinguishable from a scan nobody ever corrected.
+    var trueAbNo: String? = nil
+    /// Set instead of `trueAbNo` when the operator recognised the antibody
+    /// but not a specific inventory vial - they picked a definition, not a
+    /// vial, so only the catalog number is known ground truth.
+    var trueCatalog: String? = nil
 
     var verdictValue: Verdict { Verdict(rawValue: verdict) ?? .notFound }
 
@@ -176,6 +185,11 @@ struct ScanRecord: Codable, Identifiable, Hashable {
         if let abNo { bits.append("AbNo \(abNo)") }
         if let lot, !lot.isEmpty { bits.append("Lot \(lot)") }
         if bits.isEmpty, let catalog { bits.append("Cat \(catalog)") }
+        // A rejection without its correction visible in the list is a rejection
+        // nobody will click into, and this is the data the labelling session
+        // exists to produce.
+        if let trueAbNo { bits.append("→ AbNo \(trueAbNo)") }
+        else if let trueCatalog { bits.append("→ Cat \(trueCatalog)") }
         return bits.joined(separator: " · ")
     }
 }

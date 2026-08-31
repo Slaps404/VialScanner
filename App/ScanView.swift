@@ -427,7 +427,7 @@ struct ScanView: View {
                 onConfirm: { confirm(result) },
                 onRescan: { rescan() },
                 onPark: { park(result) },
-                onReject: { reject(result) },
+                onReject: { trueAbNo, trueCatalog in reject(result, trueAbNo: trueAbNo, trueCatalog: trueCatalog) },
                 onReceive: { startReceive(result) },
                 onChoose: { abNo in confirm(result, abNo: abNo) }
             )
@@ -612,14 +612,17 @@ struct ScanView: View {
         afterCommit()
     }
 
-    private func reject(_ result: ScanResult) {
+    private func reject(_ result: ScanResult, trueAbNo: String? = nil, trueCatalog: String? = nil) {
         cancelAuto()
         camera.discardPendingClip()
         // A rejected scan is worth logging because someone looked at a verdict
         // and disagreed with it. A scan that read nothing carries no verdict to
         // disagree with, and logging it only fills the history with blank rows.
         if !result.readNothing {
-            store.log(makeRecord(result, outcome: .rejected, clip: nil))
+            var built = makeRecord(result, outcome: .rejected, clip: nil)
+            built.trueAbNo = trueAbNo
+            built.trueCatalog = trueCatalog
+            store.log(built)
         }
         afterCommit()
     }
