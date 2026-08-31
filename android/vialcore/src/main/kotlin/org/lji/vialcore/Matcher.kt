@@ -230,6 +230,17 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
                 val w = config.fieldWeights[field] ?: return
                 val k = normKey(value)
                 if (k.length < 2) return
+                // Field extraction canonicalises as it reads: a label printed
+                // `Cell Signaling Technology` yields vendor `CST`, the spelling
+                // the catalog uses. That resolution has to be honoured here or
+                // it is thrown away, because the token bag below holds the words
+                // the label actually printed. A vendor that never prints its own
+                // abbreviation would otherwise score zero on every definition it
+                // sells, which is the whole reason the alias table exists.
+                val read = fields[field]
+                if (read != null && normKey(read) == k) {
+                    score += w; reasons.add("$field=$value"); return
+                }
                 if (k in tokens) {
                     score += w; reasons.add("$field=$value")
                 } else if (ocrFold(value) in folded) {

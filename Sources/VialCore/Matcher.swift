@@ -211,6 +211,16 @@ public struct Matcher: Sendable {
                 guard let w = config.fieldWeights[field] else { return }
                 let k = normKey(value)
                 guard k.count >= 2 else { return }
+                // Field extraction canonicalises as it reads: a label printed
+                // `Cell Signaling Technology` yields vendor `CST`, the spelling
+                // the catalog uses. That resolution has to be honoured here or
+                // it is thrown away, because the token bag below holds the words
+                // the label actually printed. A vendor that never prints its own
+                // abbreviation would otherwise score zero on every definition it
+                // sells, which is the whole reason the alias table exists.
+                if let read = fields[field], normKey(read) == k {
+                    score += w; reasons.append("\(field)=\(value)"); return
+                }
                 if tokens.contains(k) { score += w; reasons.append("\(field)=\(value)") }
                 else if folded.contains(ocrFold(value)) { score += w * 0.85; reasons.append("\(field)≈\(value)") }
                 else if let near = bestFuzzy(k, tokens), near.1 >= 0.82 {
