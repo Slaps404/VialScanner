@@ -121,6 +121,19 @@ struct ReviewDetail: View {
                                             value: bc.replacingOccurrences(of: "\u{1D}", with: "⎵"), mono: true)
                             }
                             KeyValueRow(key: "Frames", value: String(record.framesUsed))
+                            if record.outcome == .rejected {
+                                // What the operator said instead of the proposal above -
+                                // the labelled negative this whole flow exists to capture.
+                                KeyValueRow(key: "Score / margin",
+                                            value: String(format: "%.1f / %.1f", record.score, record.margin))
+                                if let trueAbNo = record.trueAbNo {
+                                    KeyValueRow(key: "Actually AbNo", value: trueAbNo)
+                                } else if let trueCatalog = record.trueCatalog {
+                                    KeyValueRow(key: "Actually catalog", value: trueCatalog)
+                                } else {
+                                    KeyValueRow(key: "Actually", value: "Not recorded")
+                                }
+                            }
                             if !record.reasons.isEmpty {
                                 SectionLabel(text: "Why the engine said this")
                                 ForEach(record.reasons, id: \.self) { r in

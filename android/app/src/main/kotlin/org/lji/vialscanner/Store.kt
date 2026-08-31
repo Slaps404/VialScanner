@@ -541,10 +541,14 @@ class AppStore(private val context: Context) {
     }
 
     fun exportScanLogCSV(): File? {
+        // New columns go on the end, not woven into the middle: anything that
+        // still parses this file by position (a spreadsheet, an old script)
+        // keeps working against a scan log made before rejection existed.
         val rows = ArrayList<List<String>>()
         rows.add(listOf(
             "When", "Verdict", "Outcome", "AbNo", "Antibody", "Catalog", "Lot",
-            "Barcode", "Score", "Margin", "Frames", "Lot not on record", "Clip", "Note", "Why",
+            "Barcode", "Score", "Margin", "Frames", "Lot not on record", "Clip",
+            "Note", "Why", "True AbNo", "True catalog",
         ))
         for (s in scans) {
             rows.add(listOf(
@@ -553,6 +557,7 @@ class AppStore(private val context: Context) {
                 "%.1f".format(s.score), "%.1f".format(s.margin),
                 s.framesUsed.toString(), if (s.lotNotOnRecord) "yes" else "", s.clipFile ?: "",
                 s.note, s.reasons.joinToString("; "),
+                s.trueAbNo ?: "", s.trueCatalog ?: "",
             ))
         }
         return write(rows, "scan-log-${fileStamp()}.csv")

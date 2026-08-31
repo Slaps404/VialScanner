@@ -159,6 +159,15 @@ data class ScanRecord(
     /** Filename under the Clips directory, or null when this scan's video was
      *  never recorded or was thrown away. Mirrors Swift's `ScanRecord.clipFile`. */
     var clipFile: String? = null,
+    /** Set only on a rejected scan where the operator identified the real
+     * vial. Null either means the scan wasn't rejected, or it was rejected
+     * with the truth unknown - "don't know" has to stay a real answer, not
+     * something indistinguishable from a scan nobody ever corrected. */
+    var trueAbNo: String? = null,
+    /** Set instead of [trueAbNo] when the operator recognised the antibody
+     * but not a specific inventory vial - they picked a definition, not a
+     * vial, so only the catalog number is known ground truth. */
+    var trueCatalog: String? = null,
 ) {
     val verdictValue: Verdict
         get() = runCatching { Verdict.valueOf(verdict) }.getOrDefault(Verdict.NOT_FOUND)
@@ -174,6 +183,11 @@ data class ScanRecord(
             abNo?.let { bits.add("AbNo $it") }
             lot?.takeIf { it.isNotEmpty() }?.let { bits.add("Lot $it") }
             if (bits.isEmpty()) catalog?.let { bits.add("Cat $it") }
+            // A rejection without its correction visible in the list is a
+            // rejection nobody will tap into, and this is the data the
+            // labelling session exists to produce.
+            trueAbNo?.let { bits.add("→ AbNo $it") }
+                ?: trueCatalog?.let { bits.add("→ Cat $it") }
             return bits.joinToString(" · ")
         }
 }

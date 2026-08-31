@@ -20,13 +20,17 @@ struct ResultCard: View {
     let onConfirm: () -> Void
     let onRescan: () -> Void
     let onPark: () -> Void
-    let onReject: () -> Void
+    /// Reject, with whatever correction the operator supplied: (true AbNo,
+    /// true catalog). Both nil means "don't know" - a real, logged answer.
+    let onReject: (String?, String?) -> Void
     let onReceive: () -> Void
     /// "It is actually this one." Used when the antibody is right but the lot
     /// read badly, which is the common way a real vial ends up unnamed.
     let onChoose: (String) -> Void
 
+    @EnvironmentObject private var store: AppStore
     @State private var showDetail = false
+    @State private var showRejectSheet = false
 
     private var canConfirm: Bool { result.vial != nil }
     private var tint: Color { result.readNothing ? Theme.textSecond : result.verdict.tint }
@@ -63,6 +67,7 @@ struct ResultCard: View {
         .overlay(alignment: .top) {
             Capsule().fill(Theme.hairline).frame(width: 38, height: 4).padding(.top, 8)
         }
+        .sheet(isPresented: $showRejectSheet) { rejectSheet }
     }
 
     // MARK: Header
@@ -387,7 +392,9 @@ struct ResultCard: View {
         if result.readNothing {
             HStack(spacing: 10) {
                 Pill(title: "Try again", icon: "arrow.clockwise", kind: .solid) { onRescan() }
-                Pill(title: "Cancel", kind: .quiet, wide: false) { onReject() }
+                // Nothing was read, so there is no verdict to correct - straight
+                // reject, no correction sheet.
+                Pill(title: "Cancel", kind: .quiet, wide: false) { onReject(nil, nil) }
             }
         } else {
             VStack(spacing: 10) {
@@ -407,11 +414,29 @@ struct ResultCard: View {
                          kind: .quiet) { onPark() }
                     if canConfirm {
                         Pill(title: "New vial", icon: "plus", kind: .tinted, wide: false) { onReceive() }
-                    } else {
-                        Pill(title: "Discard", icon: "xmark", kind: .danger, wide: false) { onReject() }
                     }
+                }
+
+                // A proposed match is exactly what needs a first-class "no" - a
+                // labelling session lives or dies on how cheap this is to reach.
+                // notFound has no proposal to reject, so it stays off this card.
+                if result.verdict != .notFound {
+                    Pill(title: "Wrong match", icon: "xmark", kind: .danger) { showRejectSheet = true }
                 }
             }
         }
+    }
+
+    // MARK: Reject correction
+
+    private var rejectSheet: some View {
+        RejectCorrectionSheet(
+            rankedCandidates: result.otherVials,
+            onPickItem: { item in onReject(item.abNo, nil) },
+            onPickDefinition: { def in onReject(nil, def.catalog) },
+            onNotOnFile: onReceive,
+            onDontKnow: { onReject(nil, nil) }
+        )
+        .environmentObject(store)
     }
 }

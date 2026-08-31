@@ -91,6 +91,7 @@ fun ScanScreen(
         if (caption != null) { delay(1400); caption = null }
     }
     var receiving by remember { mutableStateOf<ItemRecord?>(null) }
+    var rejecting by remember { mutableStateOf(false) }
     var flash by remember { mutableStateOf<String?>(null) }
 
     // Per-scan clip toggle. Seeded from "always keep" once, like Swift's
@@ -225,6 +226,7 @@ fun ScanScreen(
                         dismiss(store, controller, state.result)
                         controller.rescan(recordThisScan)
                     },
+                    onReject = { rejecting = true },
                 )
                 idle -> IdleControls(
                     store, controller, keepClip,
@@ -278,6 +280,38 @@ fun ScanScreen(
                 controller.rescan(recordThisScan)
             },
         )
+    }
+
+    if (rejecting) {
+        val s = controller.state
+        if (s is ScanState.Finished) {
+            RejectSheet(
+                store = store,
+                rankedCandidates = s.result.otherVials,
+                onDismiss = { rejecting = false },
+                onPickItem = { item ->
+                    reject(store, controller, s.result, recordThisScan, trueAbNo = item.abNo)
+                    rejecting = false
+                    controller.rescan(recordThisScan)
+                },
+                onPickDefinition = { def ->
+                    reject(store, controller, s.result, recordThisScan, trueCatalog = def.catalog)
+                    rejecting = false
+                    controller.rescan(recordThisScan)
+                },
+                onNotOnFile = {
+                    rejecting = false
+                    receiving = draftFrom(store, s.result)
+                },
+                onDontKnow = {
+                    reject(store, controller, s.result, recordThisScan)
+                    rejecting = false
+                    controller.rescan(recordThisScan)
+                },
+            )
+        } else {
+            rejecting = false
+        }
     }
 }
 
@@ -697,6 +731,7 @@ private fun ResultPanel(
     onPark: () -> Unit,
     onReceive: () -> Unit,
     onRescan: () -> Unit,
+    onReject: () -> Unit,
 ) {
     // The result is a themed card on the camera, not another glass overlay: once
     // there is an answer to read the page stops being a viewfinder.
@@ -762,6 +797,13 @@ private fun ResultPanel(
                 SecondaryButton("Rescan", Modifier.weight(1f), onRescan)
                 SecondaryButton("Review later", Modifier.weight(1f), onPark)
                 SecondaryButton("Receive", Modifier.weight(1f), onReceive)
+            }
+            // A proposed match is exactly what needs a first-class no - a
+            // labelling session lives or dies on how cheap this is to reach.
+            // NOT_FOUND has no proposal to reject, so it stays off this card.
+            if (r.verdict != Verdict.NOT_FOUND) {
+                Spacer(Modifier.height(10.dp))
+                SecondaryButton("Wrong match", Modifier.fillMaxWidth(), onReject)
             }
         }
     }
@@ -900,6 +942,36 @@ private fun dismiss(store: AppStore, controller: ScanController, r: ScanResult) 
     } else {
         controller.discardPendingClip()
     }
+}
+
+/**
+ * A rejected scan is worth logging because someone looked at a verdict and
+ * disagreed with it. A scan that read nothing carries no verdict to disagree
+ * with, and logging it only fills the history with blank rows.
+ *
+ * The clip is kept whenever clips are being kept at all. A rejection the
+ * operator took the trouble to correct is the single most valuable row a
+ * labelling run produces: it says what the matcher answered and what the
+ * answer should have been, and the video is the only way to see why.
+ */
+private fun reject(
+    store: AppStore,
+    controller: ScanController,
+    r: ScanResult,
+    wantsClip: Boolean,
+    trueAbNo: String? = null,
+    trueCatalog: String? = null,
+) {
+    if (r.readNothing) {
+        controller.discardPendingClip()
+        return
+    }
+    val clip = attachClip(store, controller, r, wantsClip)
+    store.log(
+        record(r, ScanOutcome.REJECTED, clip)
+            .copy(trueAbNo = trueAbNo, trueCatalog = trueCatalog),
+    )
+    Haptics.commit()
 }
 
 /** Pre-fill a receive form from what the scan read. */
