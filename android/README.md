@@ -76,28 +76,71 @@ on the host at 6 fps go through `MlKitFrame` exactly as CameraX would feed them,
 and it prints a verdict per clip. No camera, no phone.
 
 ```bash
-# frames out of the recordings, 6 fps, native width
+# frames out of the recordings, 6 fps, native width (do NOT downscale here:
+# it would cap what ocrLongEdge can be swept to)
 for f in Videos/pixel/*.mp4; do n=$(basename "$f" .mp4)
-  ffmpeg -v error -i "$f" -vf "fps=6,scale=1080:-2" -q:v 3 "/tmp/frames/${n}_%03d.jpg" -y
+  ffmpeg -v error -i "$f" -vf "fps=6" -q:v 3 "/tmp/frames/${n}_%03d.jpg" -y
 done
 
 $ANDROID_HOME/emulator/emulator -avd vialtest -no-window -no-audio -gpu swiftshader_indirect &
 adb push /tmp/frames/. /sdcard/Android/media/org.lji.vialscanner/frames/
 ./gradlew installDebug installDebugAndroidTest
-adb shell am instrument -w -e frames frames -e ocrLongEdge 1080 \
+adb shell am instrument -w -e frames frames -e ocrLongEdge 1152 \
     -e class org.lji.vialscanner.VideoReplayTest \
     org.lji.vialscanner.test/androidx.test.runner.AndroidJUnitRunner
-adb pull /sdcard/Android/media/org.lji.vialscanner/replay-frames-1080.txt
+adb pull /sdcard/Android/media/org.lji.vialscanner/replay-frames-1152.txt
 ```
 
 Frames must go in the *media* dir: under scoped storage an app cannot read what
 adb pushed into its own data dir.
 
-Where the two engines stand on identical footage (19 iPhone clips, same catalog):
-same verdict class on 18. On 20 Pixel clips Swift lands 3 hits to Android's 1;
-one miss is a clip where the sharpness gate passed only 2 of 12 frames to OCR,
-which is a pacing question rather than an OCR one. Most clips are `NOT_FOUND` on
-both engines because the vials in them are not in the shipped catalog.
+`-e ocrLongEdge N` and `-e roi x,y,w,h` (or `-e roi full`) are the two knobs
+worth sweeping; the report filename carries both so arms do not overwrite each
+other.
+
+### Where the two engines stand
+
+Measured 2026-08-31 over the whole 39-clip corpus (20 Pixel + 19 iPhone), frames
+extracted at native width, same catalog both sides. Verdict counts, hits =
+`CONFIDENT`:
+
+| engine | hits | ambiguous | not-found |
+|---|---|---|---|
+| Swift (`./vialscan`) | 6 | 2 | 31 |
+| Kotlin, `ocrLongEdge` 1152 | 5 | 4 | 30 |
+| Kotlin, `ocrLongEdge` 1080 | 5 | 3 | 31 |
+| Kotlin, `ocrLongEdge` 810 | 4 | 3 | 32 |
+| Kotlin, `ocrLongEdge` 576 | 4 | 3 | 32 |
+
+34 of 39 clips get the same verdict from Swift and from all four Kotlin arms, so
+only 5 clips are sensitive to anything at all. On the 20 Pixel clips the two
+engines now agree hit-for-hit (3 each). The one real remaining gap is
+`IMG_4070`, `CONFIDENT` in Swift and `AMBIGUOUS` in Kotlin at every resolution,
+so it is a recogniser difference and not a pixel-count one. Kotlin is *ahead* on
+`PXL_20260830_202650652`, where it finds catalog evidence Swift does not. Most
+clips are `NOT_FOUND` on both engines because the vials in them are not in the
+shipped catalog.
+
+This supersedes an earlier "Swift lands 3 hits to Android's 1" note, which was
+measured before the resolution and cap changes.
+
+Resolution is worth about one clip and then stops. `cropped` never upscales, so
+past 1152 (where the ROI crop of a 1080-wide frame stops being downscaled at
+all) the knob is inert, and per-frame cost was flat across every arm
+(140-154 ms on the emulator, no trend).
+
+The ROI box is not a useful knob at all. Swept at `ocrLongEdge` 1152:
+
+| roi | hits |
+|---|---|
+| `full` | 5 |
+| `0.05,0.10,0.90,0.80` | 4 |
+| `0.15,0.20,0.70,0.60` (shipped) | 5 |
+| `0.25,0.30,0.50,0.40` | 4 |
+
+Nothing beats the shipped box, and both widening and tightening lose a hit. That
+is the evidence against spending a third per-frame model on object detection to
+aim the crop: an adaptive ROI is chasing a dimension the corpus says is flat.
 
 ## Deliberate divergences
 
