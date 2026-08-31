@@ -294,6 +294,32 @@ fun DataScreen(
     onPickBackup: () -> Unit,
     onShare: (java.io.File) -> Unit,
 ) {
+    var confirmReset by remember { mutableStateOf(false) }
+
+    if (confirmReset) {
+        AlertDialog(
+            onDismissRequest = { confirmReset = false },
+            containerColor = Ink.card,
+            title = { Text("Replace everything on this phone?", color = Ink.text) },
+            text = {
+                Text(
+                    "This deletes all ${store.defs.size} definitions, ${store.items.size} vials and " +
+                        "${store.scans.size} logged scans, and puts back the snapshot the app shipped " +
+                        "with. Export first if anything here is not already in Airtable. It cannot be undone.",
+                    color = Ink.dim,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { store.resetToBundled(); confirmReset = false }) {
+                    Text("Reset", color = Ink.bad)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmReset = false }) { Text("Cancel", color = Ink.text) }
+            },
+        )
+    }
+
     Screen("Import & export", openMenu) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             SectionCard("Catalog") {
@@ -303,7 +329,13 @@ fun DataScreen(
                 Spacer(Modifier.height(14.dp))
                 PrimaryButton("Import definitions + inventory CSV", onClick = onPickCSVs)
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton("Reset to bundled snapshot", Modifier.fillMaxWidth()) { store.resetToBundled() }
+                // Behind a confirmation because it is one tap from wiping every
+                // definition, vial and scan the phone holds, and it sits directly
+                // under the import button people actually came here to press.
+                // iOS has always had this alert; Android shipped without it.
+                SecondaryButton("Reset to bundled snapshot", Modifier.fillMaxWidth()) {
+                    confirmReset = true
+                }
             }
 
             SectionCard("Export") {
