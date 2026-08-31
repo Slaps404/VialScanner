@@ -25,6 +25,8 @@ struct ScanView: View {
     @State private var countdownTotal: Double = 1
     @State private var autoAction: AutoAction? = nil
     @State private var visualFocusPoint: CGPoint? = nil
+    @State private var caption: String? = nil
+    @State private var captionSeq = 0
 
     private enum AutoAction { case confirm, park, rescan }
 
@@ -36,6 +38,7 @@ struct ScanView: View {
 
             VStack(spacing: 0) {
                 topBar
+                captionBar
                 Spacer()
                 bottomStack
             }
@@ -180,6 +183,7 @@ struct ScanView: View {
                 camera.toggleFocusLock()
                 Haptics.tap()
                 if !camera.isFocusLocked { visualFocusPoint = nil }
+                flash(camera.isFocusLocked ? "Focus locked" : "Focus following the label")
             }
 
             if camera.hasTorch {
@@ -187,10 +191,44 @@ struct ScanView: View {
                                 active: camera.torchOn) {
                     camera.toggleTorch()
                     Haptics.tap()
+                    flash(camera.torchOn ? "Light on" : "Light off")
                 }
             }
         }
         .padding(.top, 6)
+    }
+
+    /// What the control you just pressed did, in words, for about a second.
+    ///
+    /// Every control up here is an icon, and an icon is only obvious to whoever
+    /// chose it: a padlock could plausibly lock focus, lock exposure, or lock the
+    /// whole screen. A hover tooltip is not available on a phone and a long-press
+    /// one is a gesture nobody will discover either, so the caption rides on the
+    /// tap that already happened and names the state the control just moved to.
+    /// It sits under the top bar rather than at the finger, so it never appears
+    /// beneath the hand that summoned it.
+    @ViewBuilder
+    private var captionBar: some View {
+        if let caption {
+            Text(caption)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12).padding(.vertical, 7)
+                .background(Capsule().fill(Color.black.opacity(0.55)))
+                .padding(.top, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+        }
+    }
+
+    /// Show a caption and retire it, unless another one has replaced it first.
+    private func flash(_ text: String) {
+        captionSeq += 1
+        let seq = captionSeq
+        withAnimation(.easeOut(duration: 0.15)) { caption = text }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            guard seq == captionSeq else { return }
+            withAnimation(.easeIn(duration: 0.3)) { caption = nil }
+        }
     }
 
     /// Always visible, because a stamp nobody can see is a stamp nobody can
@@ -209,7 +247,10 @@ struct ScanView: View {
             }
             .buttonStyle(PressScale())
         } else {
-            GlassCircleIcon(systemName: "shippingbox", size: 34) { showSessionBox = true }
+            GlassCircleIcon(systemName: "shippingbox", size: 34) {
+                flash("Stamp a box onto every vial you confirm")
+                showSessionBox = true
+            }
         }
     }
 
@@ -237,8 +278,9 @@ struct ScanView: View {
                 Button {
                     camera.setZoom(z)
                     Haptics.tap()
+                    flash(z < 1 ? "Wide lens — focuses closest" : "\(zoomLabel(z)) zoom")
                 } label: {
-                    Text(z == 0.5 ? "0.5×" : (z == 1.0 ? "1×" : "\(Int(z))×"))
+                    Text(zoomLabel(z))
                         .font(.system(size: 13, weight: isSelected ? .bold : .medium))
                         .foregroundStyle(isSelected ? .black : .white)
                         .frame(width: 44, height: 30)
@@ -251,6 +293,12 @@ struct ScanView: View {
         }
         .padding(4)
         .background(Capsule().fill(Color.black.opacity(0.38)))
+    }
+
+    /// Whole stops read as "1×"; anything else keeps a decimal, because a phone
+    /// whose wide lens is at 0.615× should not be told it is at 0.5×.
+    private func zoomLabel(_ z: CGFloat) -> String {
+        z >= 1 && z == z.rounded() ? "\(Int(z))×" : String(format: "%.1f×", z)
     }
 
     private var idleControls: some View {
@@ -285,6 +333,7 @@ struct ScanView: View {
                                 size: 50, active: keepClip) {
                     keepClip.toggle()
                     Haptics.tap()
+                    flash(keepClip ? "Keeping a clip of the next scan" : "Not keeping clips")
                 }
             }
             .frame(maxWidth: .infinity)
@@ -297,6 +346,9 @@ struct ScanView: View {
                         size: 50, active: store.settings.handsFree) {
             store.settings.handsFree.toggle()
             Haptics.tap()
+            flash(store.settings.handsFree
+                  ? "Hands-free — scans and saves on its own"
+                  : "Hands-free off — press to scan")
             if store.settings.handsFree {
                 Speaker.shared.say("Hands-free on", force: true)
             } else {

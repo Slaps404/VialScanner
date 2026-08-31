@@ -74,6 +74,20 @@ fun ScanScreen(
 ) {
     val owner = LocalLifecycleOwner.current
     var showSessionBox by remember { mutableStateOf(false) }
+
+    // What the control you just pressed did, in words, for about a second.
+    // Every control on this screen is an icon, and an icon is only obvious to
+    // whoever chose it: a padlock could plausibly lock focus, lock exposure, or
+    // lock the screen. Phones have no hover, and a long-press tooltip is a
+    // gesture nobody discovers either, so the caption rides on the tap that
+    // already happened and names the state the control just moved to. Swift
+    // does the same in `ScanView.flash`.
+    var caption by remember { mutableStateOf<String?>(null) }
+    var captionSeq by remember { mutableStateOf(0) }
+    val tip: (String) -> Unit = { caption = it; captionSeq++ }
+    LaunchedEffect(captionSeq) {
+        if (caption != null) { delay(1400); caption = null }
+    }
     var receiving by remember { mutableStateOf<ItemRecord?>(null) }
     var flash by remember { mutableStateOf<String?>(null) }
 
@@ -165,12 +179,16 @@ fun ScanScreen(
             Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
-            TopBar(store, controller, openMenu) { showSessionBox = true }
+            TopBar(store, controller, openMenu, tip) {
+                tip("Stamp a box onto every vial you confirm")
+                showSessionBox = true
+            }
+            CaptionBar(caption)
             Spacer(Modifier.weight(1f))
 
             if (granted && state !is ScanState.Finished) {
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    ZoomBar(controller)
+                    ZoomBar(controller, tip)
                 }
                 Spacer(Modifier.height(12.dp))
             }
@@ -184,7 +202,7 @@ fun ScanScreen(
                     onReceive = { receiving = draftFrom(store, state.result) },
                     onRescan = { controller.rescan() },
                 )
-                idle -> IdleControls(store) { Haptics.commit(); controller.rescan() }
+                idle -> IdleControls(store, tip) { Haptics.commit(); controller.rescan() }
                 else -> ScanningControls(state as ScanState.Scanning) {
                     controller.finishNow()
                 }
@@ -354,8 +372,32 @@ private fun zoomLabel(z: Float): String =
     // number the hardware does not have.
     if (z >= 1f && z == z.toInt().toFloat()) "${z.toInt()}x" else "%.1fx".format(z)
 
+/** The caption pill. Under the top bar, so it never appears beneath the hand
+ *  that summoned it. */
 @Composable
-private fun ZoomBar(controller: ScanController) {
+private fun CaptionBar(caption: String?) {
+    androidx.compose.animation.AnimatedVisibility(
+        visible = caption != null,
+        enter = androidx.compose.animation.fadeIn(),
+        exit = androidx.compose.animation.fadeOut(),
+    ) {
+        Box(Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) {
+            Text(
+                caption.orEmpty(),
+                color = Color.White,
+                fontSize = Type.caption,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ZoomBar(controller: ScanController, tip: (String) -> Unit) {
     if (controller.zoomOptions.size < 2) return
     Row(
         Modifier
@@ -374,7 +416,11 @@ private fun ZoomBar(controller: ScanController) {
                 modifier = Modifier
                     .clip(CircleShape)
                     .background(if (on) Color.White else Color.Transparent)
-                    .clickable { controller.setZoom(z); Haptics.tap() }
+                    .clickable {
+                        controller.setZoom(z)
+                        Haptics.tap()
+                        tip(if (z < 1f) "Wide lens - focuses closest" else "${zoomLabel(z)} zoom")
+                    }
                     .padding(horizontal = 11.dp, vertical = 7.dp),
             )
         }
@@ -388,6 +434,7 @@ private fun TopBar(
     store: AppStore,
     controller: ScanController,
     openMenu: () -> Unit,
+    tip: (String) -> Unit,
     onSessionBox: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -412,13 +459,21 @@ private fun TopBar(
         GlassCircleIcon(
             if (controller.focusLocked) Icons.Filled.Lock else Icons.Filled.LockOpen,
             active = controller.focusLocked,
-        ) { controller.toggleFocusLock(); Haptics.tap() }
+        ) {
+            controller.toggleFocusLock()
+            Haptics.tap()
+            tip(if (controller.focusLocked) "Focus locked" else "Focus following the label")
+        }
         Spacer(Modifier.width(10.dp))
 
         GlassCircleIcon(
             if (controller.torchOn) Icons.Filled.FlashOn else Icons.Filled.FlashOff,
             active = controller.torchOn,
-        ) { controller.toggleTorch(); Haptics.tap() }
+        ) {
+            controller.toggleTorch()
+            Haptics.tap()
+            tip(if (controller.torchOn) "Light on" else "Light off")
+        }
     }
 }
 
@@ -439,7 +494,7 @@ private fun WhiteCapsule(icon: androidx.compose.ui.graphics.vector.ImageVector, 
 // ---- Idle ------------------------------------------------------------------
 
 @Composable
-private fun IdleControls(store: AppStore, onScan: () -> Unit) {
+private fun IdleControls(store: AppStore, tip: (String) -> Unit, onScan: () -> Unit) {
     Column(
         Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -464,6 +519,10 @@ private fun IdleControls(store: AppStore, onScan: () -> Unit) {
                 // Announced with force = true: the mode itself changing is worth
                 // a word even with "speak results" off, same as Swift's
                 // `Speaker.shared.say("Hands-free on", force: true)`.
+                tip(
+                    if (turningOn) "Hands-free - scans and saves on its own"
+                    else "Hands-free off - press to scan"
+                )
                 if (turningOn) Speaker.say("Hands-free on", force = true) else Speaker.stop()
             }
 
