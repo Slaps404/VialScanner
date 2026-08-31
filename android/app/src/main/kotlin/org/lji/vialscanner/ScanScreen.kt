@@ -88,7 +88,7 @@ fun ScanScreen(
     LaunchedEffect(captionSeq) {
         if (caption != null) { delay(1400); caption = null }
     }
-    var receiving by remember { mutableStateOf<ItemRecord?>(null) }
+    var receiving by remember { mutableStateOf<ReceiveDraft?>(null) }
     var flash by remember { mutableStateOf<String?>(null) }
 
     val state = controller.state
@@ -199,7 +199,7 @@ fun ScanScreen(
                     store = store,
                     onConfirm = { flash = confirm(store, state.result); controller.rescan() },
                     onPark = { park(store, state.result); flash = "Saved for review"; controller.rescan() },
-                    onReceive = { receiving = draftFrom(store, state.result) },
+                    onReceive = { receiving = buildReceiveDraft(store, state.result) },
                     onRescan = { controller.rescan() },
                 )
                 idle -> IdleControls(store, tip) { Haptics.commit(); controller.rescan() }
@@ -228,10 +228,12 @@ fun ScanScreen(
 
     if (showSessionBox) SessionBoxSheet(store) { showSessionBox = false }
 
-    receiving?.let { draft ->
+    receiving?.let { rd ->
         ReceiveSheet(
             store = store,
-            draft = draft,
+            draft = rd.item,
+            prefillDef = rd.prefillDef,
+            sources = rd.sources,
             onDismiss = { receiving = null },
             onSaved = { saved ->
                 val s = controller.state
@@ -777,14 +779,62 @@ private fun park(store: AppStore, r: ScanResult) {
     }
 }
 
-/** Pre-fill a receive form from what the scan read. */
-fun draftFrom(store: AppStore, r: ScanResult): ItemRecord = ItemRecord(
-    abNo = store.nextAbNo(),
-    definitionName = r.definition?.name ?: "",
-    vialName = r.definition?.name ?: "",
-    lot = r.fields[LabelField.LOT] ?: "",
-    concentration = r.fields[LabelField.CONCENTRATION] ?: "",
-    location = store.settings.defaultLocation,
-    box = store.activeSessionBox ?: store.settings.defaultBox,
-    owner = store.settings.defaultOwner,
-)
+/** Pre-fill a receive form from what the scan read.
+ *
+ * NEW VIAL - nothing on file matched - is the common outcome, not the edge
+ * case: most clips in the sample set end here. So when `r.definition` is
+ * null this also builds the `DefRecord` the same scan read enough for, using
+ * exactly the fields catalog/clone/vendor/isotype that a definition needs,
+ * instead of leaving `vialName` a "Cat 12345" placeholder for someone to
+ * notice and fix by hand later. */
+fun buildReceiveDraft(store: AppStore, r: ScanResult): ReceiveDraft {
+    val sources = mutableMapOf<String, FieldSource>()
+
+    val lot = r.fields[LabelField.LOT] ?: r.barcode?.lot ?: ""
+    if (lot.isNotEmpty()) sources["Lot"] = if (r.barcode?.lot != null) FieldSource.BARCODE else FieldSource.OCR
+    val concentration = r.fields[LabelField.CONCENTRATION] ?: ""
+    if (concentration.isNotEmpty()) sources["Concentration"] = FieldSource.OCR
+
+    // Remembered rather than blank - see `rememberReceivingDefaults` at the
+    // call site for how these get updated after a save.
+    val owner = store.settings.defaultOwner
+    if (owner.isNotEmpty()) sources["Owner"] = FieldSource.REMEMBERED
+    val location = store.settings.defaultLocation
+    if (location.isNotEmpty()) sources["Location"] = FieldSource.REMEMBERED
+    val box = store.activeSessionBox ?: store.settings.defaultBox
+    if (box.isNotEmpty()) sources["Box"] = FieldSource.REMEMBERED
+
+    val prefillDef = if (r.definition == null) definitionDraft(r, sources) else null
+
+    val item = ItemRecord(
+        abNo = store.nextAbNo(),
+        definitionName = r.definition?.name ?: "",
+        vialName = r.definition?.name ?: prefillDef?.name ?: "",
+        lot = lot,
+        concentration = concentration,
+        location = location,
+        box = box,
+        owner = owner,
+    )
+    return ReceiveDraft(item, prefillDef, sources)
+}
+
+/** A `DefRecord` built from whatever the scan read, so the operator corrects
+ *  OCR mistakes instead of retyping a label from scratch. */
+private fun definitionDraft(r: ScanResult, sources: MutableMap<String, FieldSource>): DefRecord? {
+    val catalog = r.fields[LabelField.CATALOG] ?: r.barcode?.catalog ?: ""
+    val clone = r.fields[LabelField.CLONE] ?: ""
+    val vendor = r.fields[LabelField.VENDOR] ?: ""
+    val isotype = r.fields[LabelField.ISOTYPE] ?: ""
+    if (catalog.isEmpty() && clone.isEmpty() && vendor.isEmpty()) return null
+
+    if (catalog.isNotEmpty()) sources["Catalog #"] = if (r.barcode?.catalog != null) FieldSource.BARCODE else FieldSource.OCR
+    if (clone.isNotEmpty()) sources["Clone"] = FieldSource.OCR
+    if (isotype.isNotEmpty()) sources["Isotype"] = FieldSource.OCR
+    if (vendor.isNotEmpty()) sources["Vendor"] = FieldSource.OCR
+
+    var name = listOfNotNull(vendor.ifEmpty { null }, clone.ifEmpty { null }?.let { "Clone $it" })
+        .joinToString(" ")
+    if (name.isEmpty() && catalog.isNotEmpty()) name = "Cat $catalog"
+    return DefRecord(name = name, clone = clone, isotype = isotype, vendor = vendor, catalog = catalog, isLocal = true)
+}

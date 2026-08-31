@@ -230,6 +230,29 @@ data class AuditSession(
     val title: String get() = if (scope == AuditScope.EVERYTHING) "Whole inventory" else "${scope.label} $scopeValue"
 }
 
+// MARK: - Field provenance
+//
+// A receive form built from a scan is a mix of certainties: a barcode decode
+// is ground truth, an OCR read is a good guess, and a remembered default is
+// neither - it is just what was true last time. Tagging each prefilled value
+// with where it came from is what lets the operator trust the barcode fields
+// and double check the OCR ones, without turning the form into a dashboard.
+enum class FieldSource(val label: String) {
+    BARCODE("From barcode"),
+    OCR("Read from label"),
+    REMEMBERED("Last used"),
+}
+
+/** A vial draft plus the antibody definition the same scan could support, and
+ *  where each prefilled value came from. NEW VIAL - a scan matching nothing on
+ *  file - is the common outcome, not the edge case, so the receive flow always
+ *  carries both pieces together instead of making the definition a hunt. */
+data class ReceiveDraft(
+    val item: ItemRecord,
+    val prefillDef: DefRecord? = null,
+    val sources: Map<String, FieldSource> = emptyMap(),
+)
+
 // MARK: - Settings
 
 @Serializable

@@ -263,11 +263,31 @@ private fun BasicField(placeholder: String, value: String, modifier: Modifier, o
     }
 }
 
-/** A labelled entry field inside a card. */
+/** A labelled entry field inside a card.
+ *
+ * `source`, when set, is a quiet badge naming where the value came from - a
+ * barcode decode, an OCR read, or a remembered default - so the operator
+ * knows what to double check without the field turning into a report. */
 @Composable
-fun Field(label: String, value: String, modifier: Modifier = Modifier, onChange: (String) -> Unit) {
+fun Field(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    source: FieldSource? = null,
+    onChange: (String) -> Unit,
+) {
     Column(modifier.padding(vertical = 6.dp)) {
-        Text(label, color = Ink.textSecond, fontSize = Type.caption, fontWeight = Type.labelWeight)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = Ink.textSecond, fontSize = Type.caption, fontWeight = Type.labelWeight)
+            if (source != null) {
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    source.label,
+                    color = if (source == FieldSource.BARCODE) Ink.accent else Ink.dim,
+                    fontSize = Type.caption,
+                )
+            }
+        }
         Spacer(Modifier.height(6.dp))
         Row(
             Modifier
@@ -287,9 +307,15 @@ fun Field(label: String, value: String, modifier: Modifier = Modifier, onChange:
  * in the app - so this suggests rather than constrains.
  */
 @Composable
-fun SuggestField(label: String, value: String, options: List<String>, onChange: (String) -> Unit) {
+fun SuggestField(
+    label: String,
+    value: String,
+    options: List<String>,
+    source: FieldSource? = null,
+    onChange: (String) -> Unit,
+) {
     Column {
-        Field(label, value, onChange = onChange)
+        Field(label, value, source = source, onChange = onChange)
         val shown = options.filter { it.contains(value, ignoreCase = true) && it != value }.take(6)
         if (shown.isNotEmpty()) {
             Row(Modifier.horizontalScroll(rememberScrollState())) {
