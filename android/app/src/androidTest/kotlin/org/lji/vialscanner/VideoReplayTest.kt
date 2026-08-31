@@ -93,6 +93,9 @@ class VideoReplayTest {
         // "OCR never saw the text" and "extraction rejected the text it saw".
         val only = InstrumentationRegistry.getArguments().getString("only")
         val dumpText = InstrumentationRegistry.getArguments().getString("dumpText") == "true"
+        // "x,y,w,h" in frame fractions, or "full". Sweeping this is how we tell
+        // whether the ROI box or the OCR resolution is the binding constraint.
+        val roiArg = InstrumentationRegistry.getArguments().getString("roi")
         // The media dir, not getExternalFilesDir: under scoped storage a file
         // pushed by adb into the app's data dir is not readable by the app.
         val root = ctx.externalMediaDirs.first()
@@ -115,7 +118,12 @@ class VideoReplayTest {
             .filterKeys { only == null || it.contains(only) }
         require(byVideo.isNotEmpty()) { "no clip matches only=$only" }
         for ((video, frames) in byVideo.toSortedMap()) {
-            val engine = ScanEngine(catalog, EngineConfig())
+            val engine = ScanEngine(catalog, EngineConfig().also { c ->
+                if (roiArg != null) c.regionOfInterest = if (roiArg == "full") null else {
+                    val v = roiArg.split(',').map { it.trim().toDouble() }
+                    NormRect(v[0], v[1], v[2], v[3])
+                }
+            })
             val began = System.nanoTime()
             var state: ScanState = ScanState.Scanning(0, 0, 0, 0.0, "")
             var used = 0
@@ -153,7 +161,8 @@ class VideoReplayTest {
 
         recognizer.close()
         scanner.close()
-        File(root, "replay-$dirName-$ocrLongEdge.txt").writeText(report.toString())
+        val tag2 = roiArg?.replace(',', '_')?.let { "-roi$it" } ?: ""
+        File(root, "replay-$dirName-$ocrLongEdge$tag2.txt").writeText(report.toString())
         Log.i(tag, "wrote replay-report.txt")
     }
 }
