@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.util.Rational
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -123,6 +124,9 @@ class ScanController(private val store: AppStore, context: Context) {
     private var minZoom = 1f
     private var maxZoom = 1f
     private var previewView: PreviewView? = null
+    /** Diagnostic: log the real resolution chain once per bind, not per frame. */
+    private var loggedChain = false
+
     private var lastAutoFocus = 0L
     private var lastFocusTarget: Pair<Double, Double>? = null
     private val main = Handler(Looper.getMainLooper())
@@ -219,24 +223,59 @@ class ScanController(private val store: AppStore, context: Context) {
         c.cameraControl.enableTorch(torchOn)
     }
 
+    /**
+     * A 1920-long-edge target, used for both Preview and ImageAnalysis so the
+     * StreamSharing parent and the analysis stream agree on how much detail to
+     * carry. CLOSEST_HIGHER_THEN_LOWER rather than an exact size: no sensor is
+     * obliged to offer 1920x1080, and taking the next size up beats silently
+     * falling back to something far smaller.
+     */
+    private fun hdSelector() = ResolutionSelector.Builder()
+        .setResolutionStrategy(
+            ResolutionStrategy(
+                Size(1920, 1080),
+                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+            )
+        )
+        .build()
+
     fun bind(owner: LifecycleOwner, view: PreviewView) {
         val ctx = view.context
         val future = ProcessCameraProvider.getInstance(ctx)
         future.addListener({
             val provider = future.get()
-            val preview = Preview.Builder().build().also { it.setSurfaceProvider(view.surfaceProvider) }
+            // Preview needs an explicit resolution for the same reason analysis
+            // does. Preview and VideoCapture cannot have separate streams on
+            // this hardware, so CameraX puts them behind one StreamSharing
+            // parent and sizes that parent from Preview. Left at its default,
+            // Preview asked small, the parent came back 1280x960, and the
+            // saved clip was a 628x1280 crop of it - unreadable on playback
+            // even though the recorder had asked for FHD.
+            val preview = Preview.Builder()
+                .setResolutionSelector(hdSelector())
+                .build()
+                .also { it.setSurfaceProvider(view.surfaceProvider) }
             val analysis = ImageAnalysis.Builder()
-                // Cap the analysis stream at 720p. Label text is legible well
-                // below sensor resolution, and every extra pixel is paid four
-                // times over per frame: rotate, downscale for sharpness, crop
-                // for OCR, crop for barcodes.
-                .setResolutionSelector(
-                    ResolutionSelector.Builder()
-                        .setResolutionStrategy(
-                            ResolutionStrategy(Size(1280, 720), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)
-                        )
-                        .build()
-                )
+                // Ask for a 1920-long-edge stream, matching Swift's
+                // `.hd1920x1080` preset.
+                //
+                // 720p was the wrong call and the measurement says so. On a
+                // Pixel 5a it resolved to a 1280x960 buffer, the ViewPort then
+                // cropped it to 1280x628, and after the engine's 0.15 ROI inset
+                // ML Kit was reading a 440x781 image. iOS hands Vision roughly
+                // 756x1344 for the same vial. Character height scales with the
+                // short edge, so label text that lands 18 px tall on an iPhone
+                // landed near 10 px here, under what ML Kit reads reliably. The
+                // symptom reads as blur; the cause is that the pixels were
+                // never there.
+                //
+                // The extra cost is real - the per-frame bitmap goes from about
+                // 3 MB to 7 MB, and `uprightBitmap` copies it once to rotate -
+                // but STRATEGY_KEEP_ONLY_LATEST drops what the analyser cannot
+                // keep up with, and the engine only needs `maxOCRFrames` (24)
+                // good frames across `maxScanSeconds` (4). Roughly 6 fps is
+                // enough; there is a lot of room above that.
+                .setResolutionSelector(hdSelector())
                 // Drop frames rather than queue them: a stale frame answers a
                 // question about a vial the user has already turned past.
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -321,6 +360,18 @@ class ScanController(private val store: AppStore, context: Context) {
             // sensor, and a vial held at arm's length reads better at 1x.
             val want = if (store.settings.preferUltraWideZoom) minZoom else 1f
             setZoom(want.coerceIn(minZoom, maxZoom))
+
+            // Aim focus and exposure at the middle of the frame straight away.
+            //
+            // `steerFocus` can only aim at text the recogniser has already
+            // found, which is a circular dependency: a label too soft to read
+            // produces no boxes, no boxes means no steering, and default
+            // centre-weighted continuous autofocus is free to settle on the
+            // bench behind the vial - which is exactly what the debug clips
+            // show, background sharp and label soft. Seeding the region at the
+            // reticle centre breaks the circle. Swift gets this for free in
+            // `resetFocus`, which parks the point of interest at 0.5, 0.5.
+            main.post { aimAt(0.5f, 0.5f, lock = false) }
         }, ContextCompat.getMainExecutor(ctx))
     }
 
@@ -387,10 +438,16 @@ class ScanController(private val store: AppStore, context: Context) {
 
         val now = System.currentTimeMillis()
         val prev = lastFocusTarget
+        // Both gates got looser when the action stopped locking. A held scan
+        // now stays under continuous autofocus between nudges, so a nudge is no
+        // longer the only thing keeping focus alive - and every nudge still
+        // costs a real lens sweep. 0.08 of the frame is inside hand tremor at
+        // arm's length, so at the old 600 ms floor a steady hand re-triggered a
+        // sweep roughly twice a second and the lens never settled.
         val moved = prev == null ||
-            kotlin.math.hypot(cx - prev.first, cy - prev.second) > 0.08
-        if (!moved && now - lastAutoFocus < 2_000) return
-        if (now - lastAutoFocus < 600) return
+            kotlin.math.hypot(cx - prev.first, cy - prev.second) > 0.15
+        if (!moved && now - lastAutoFocus < 2_500) return
+        if (now - lastAutoFocus < 1_200) return
         lastAutoFocus = now
         lastFocusTarget = cx to cy
 
@@ -399,7 +456,15 @@ class ScanController(private val store: AppStore, context: Context) {
         // IllegalStateException and takes the app down on the first frame that
         // finds text. Hop threads; the point is stale by a frame either way,
         // which does not matter for something already throttled to seconds.
-        main.post { aimAt(cx.toFloat(), cy.toFloat(), lock = true) }
+        // Unlocked, deliberately. `disableAutoCancel` was the original choice
+        // and it is the wrong one: it turns a metering request into a one-shot
+        // scan whose result is then *held*, so the first scan that converges on
+        // the wrong plane stays wrong. On a cluttered bench the wrong plane is
+        // the common case - a floor or a desk has far more contrast than a
+        // small clear label, so it is what the AF algorithm grabs. Letting the
+        // action auto-cancel hands the lens back to continuous autofocus, which
+        // is the state Swift never leaves.
+        main.post { aimAt(cx.toFloat(), cy.toFloat(), lock = false) }
     }
 
     /** Build a metering point from view fractions and send it. Main thread only. */
@@ -419,8 +484,21 @@ class ScanController(private val store: AppStore, context: Context) {
     private fun analyze(proxy: ImageProxy) {
         try {
             if (!running || state is ScanState.Finished) return
+            val bmp = uprightBitmap(proxy)
+            if (!loggedChain) {
+                loggedChain = true
+                val r = proxy.cropRect
+                Log.i(
+                    "VialOptics",
+                    "buffer=${proxy.width}x${proxy.height} " +
+                        "crop=${r.width()}x${r.height()} " +
+                        "rot=${proxy.imageInfo.rotationDegrees} " +
+                        "ocrBitmap=${bmp.width}x${bmp.height} " +
+                        "roiInset=${store.settings.roiInset}",
+                )
+            }
             val frame = MlKitFrame(
-                bitmap = uprightBitmap(proxy),
+                bitmap = bmp,
                 timestamp = proxy.imageInfo.timestamp / 1_000_000_000.0,
                 recognizer = recognizer,
                 scanner = scanner,
