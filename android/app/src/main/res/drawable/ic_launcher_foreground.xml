@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A vial: cap, neck, body, and a stripe standing in for a liquid line.
+     All geometry stays inside the ~66dp safe circle centered in the 108x108
+     viewport, so it survives circle/squircle/rounded-square launcher masks. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M50,26 L58,26 A2,2 0 0 1 60,28 L60,32 A2,2 0 0 1 58,34 L50,34 A2,2 0 0 1 48,32 L48,28 A2,2 0 0 1 50,26 Z" />
+
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M48,34 L60,34 L60,42 L48,42 Z" />
+
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M46,40 L62,40 A6,6 0 0 1 68,46 L68,74 A6,6 0 0 1 62,80 L46,80 A6,6 0 0 1 40,74 L40,46 A6,6 0 0 1 46,40 Z" />
+
+    <path
+        android:fillColor="#0F5E56"
+        android:pathData="M42,58 L66,58 L66,62 L42,62 Z" />
+</vector>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Solid ground for the adaptive icon. Deep teal so the white vial glyph reads
+     clearly against it, and it doesn't get confused with common lab-app blues. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#0F5E56" />
+</shape>
