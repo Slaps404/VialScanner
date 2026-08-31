@@ -43,6 +43,18 @@ class MlKitFrame(
 
     override val sharpness: Double by lazy { laplacianVariance(bitmap) }
 
+    /**
+     * Where the recogniser last found text, in the engine's coordinates.
+     *
+     * The engine has no use for this - it wants the strings - but the camera
+     * does: steering focus at the label means knowing where on the frame the
+     * label is, and this pass has already paid for that answer. Swift gets it
+     * the same way, by keeping the boxes Vision hands back
+     * (`CameraController.activeTextBoxes`).
+     */
+    var lastTextBoxes: List<NormRect> = emptyList()
+        private set
+
     override fun detectBarcodes(roi: NormRect?): List<BarcodePayload> {
         // Full resolution: decode rate collapses when a DataMatrix is downscaled.
         val (crop, _) = cropped(roi, longEdge = 0)
@@ -79,6 +91,7 @@ class MlKitFrame(
             // a returned line has already cleared the recogniser's own bar.
             out.add(TextObservation(line.text, 1.0f, NormRect(x, minY, w, h)))
         }
+        lastTextBoxes = out.mapNotNull { it.boundingBox }
         return out
     }
 

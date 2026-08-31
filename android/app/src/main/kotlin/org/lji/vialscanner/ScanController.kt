@@ -5,6 +5,7 @@ import android.graphics.Matrix
 import android.util.Rational
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -25,9 +26,11 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import org.lji.vialcore.NormRect
 import org.lji.vialcore.ScanEngine
 import org.lji.vialcore.ScanState
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Camera plumbing and the live scan, kept apart from the screens.
@@ -73,6 +76,46 @@ class ScanController(private val store: AppStore) {
     var torchOn by mutableStateOf(false)
         private set
 
+    // ---- Optics ----------------------------------------------------------
+    // A vial label is 5-10 cm from the lens, which is the hardest distance for
+    // a phone to find on its own: left alone, continuous autofocus hunts
+    // between the label and the freezer rack behind it, and every frame it
+    // spends hunting is a frame the sharpness gate throws away. The three
+    // controls below are the same three Swift has, for the same reason.
+
+    /** Focus held on one distance, so a slow rotation cannot make it hunt. */
+    var focusLocked by mutableStateOf(false)
+        private set
+
+    /** Where the last focus request was aimed, in view fractions, for the
+     *  on-screen ring. Null means nothing to draw. */
+    var focusPoint by mutableStateOf<Pair<Float, Float>?>(null)
+        private set
+
+    var zoomRatio by mutableStateOf(1f)
+        private set
+
+    /** The lens stops worth offering, e.g. 0.5x / 1x / 2x. One entry means the
+     *  phone has nothing to switch between and the picker should not appear. */
+    var zoomOptions by mutableStateOf(listOf(1f))
+        private set
+
+    /** Where the recogniser last saw text. Drawn over the preview, and the
+     *  target the tracking autofocus steers at. */
+    var textBoxes by mutableStateOf<List<NormRect>>(emptyList())
+        private set
+
+    /** Off makes focus behave like any camera app: centre-weighted, no
+     *  steering. Surfaced because a label that fills the frame does not need
+     *  it, and steering costs a focus round-trip every 0.4 s. */
+    var autoTextFocus = true
+
+    private var minZoom = 1f
+    private var maxZoom = 1f
+    private var previewView: PreviewView? = null
+    private var lastAutoFocus = 0L
+    private var lastFocusTarget: Pair<Double, Double>? = null
+
     private var camera: Camera? = null
     private var engine: ScanEngine? = null
     private var engineStamp: String = ""
@@ -96,6 +139,10 @@ class ScanController(private val store: AppStore) {
         currentEngine().reset()
         state = idle()
         running = true
+        // A stale box from the previous vial would be drawn over the new one,
+        // and would be the first thing tracking autofocus steered at.
+        textBoxes = emptyList()
+        lastFocusTarget = null
     }
 
     fun pause() { running = false }
@@ -159,12 +206,119 @@ class ScanController(private val store: AppStore) {
                 .build()
 
             provider.unbindAll()
-            camera = provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, group)
+            previewView = view
+            val cam = provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, group)
+            camera = cam
             if (store.settings.torchOnByDefault) {
                 torchOn = true
-                camera?.cameraControl?.enableTorch(true)
+                cam.cameraControl.enableTorch(true)
             }
+
+            // What this phone's back camera can actually do. Asking for 0.5x on
+            // a phone without an ultra-wide is not an error, it silently clamps
+            // to 1x, which would leave a dead button on the screen.
+            val z = cam.cameraInfo.zoomState.value
+            minZoom = z?.minZoomRatio ?: 1f
+            maxZoom = (z?.maxZoomRatio ?: 1f).coerceAtMost(10f)
+            zoomOptions = listOf(0.5f, 1f, 2f).filter { it in minZoom..maxZoom }
+                .ifEmpty { listOf(1f) }
+
+            // Ultra-wide focuses far closer than the main lens - around 2 cm
+            // against 10 - which is the whole reason to prefer it here. It is a
+            // preference and not the default because it is also the softer
+            // sensor, and a vial held at arm's length reads better at 1x.
+            val want = if (store.settings.preferUltraWideZoom) minZoom else 1f
+            setZoom(want.coerceIn(minZoom, maxZoom))
         }, ContextCompat.getMainExecutor(ctx))
+    }
+
+    // ---- Focus & zoom -----------------------------------------------------
+
+    /**
+     * Aim focus and exposure at a point, given as fractions of the preview.
+     *
+     * `lock` is the difference between "look here now" and "look here and stop
+     * deciding": CameraX cancels a focus action after a few seconds by default
+     * and hands the lens back to continuous autofocus, which is right for a tap
+     * and wrong for the lock button.
+     */
+    fun focusAt(fx: Float, fy: Float, lock: Boolean = false) {
+        val view = previewView ?: return
+        val cam = camera ?: return
+        val pt = view.meteringPointFactory.createPoint(fx * view.width, fy * view.height)
+        val action = FocusMeteringAction.Builder(
+            pt, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
+        ).apply {
+            if (lock) disableAutoCancel() else setAutoCancelDuration(4, TimeUnit.SECONDS)
+        }.build()
+        runCatching { cam.cameraControl.startFocusAndMetering(action) }
+        focusPoint = fx to fy
+        focusLocked = lock
+    }
+
+    fun toggleFocusLock() {
+        if (focusLocked) {
+            runCatching { camera?.cameraControl?.cancelFocusAndMetering() }
+            focusLocked = false
+            focusPoint = null
+        } else {
+            // Lock on whatever is being aimed at: the last tap if there was one,
+            // otherwise the middle of the reticle.
+            val (x, y) = focusPoint ?: (0.5f to 0.5f)
+            focusAt(x, y, lock = true)
+        }
+    }
+
+    fun setZoom(r: Float) {
+        val clamped = r.coerceIn(minZoom, maxZoom)
+        runCatching { camera?.cameraControl?.setZoomRatio(clamped) }
+        zoomRatio = clamped
+    }
+
+    fun zoomBy(scale: Float) = setZoom(zoomRatio * scale)
+
+    /**
+     * Steer focus at the text the recogniser just found.
+     *
+     * Swift does this by moving `focusPointOfInterest` while the device stays in
+     * `.continuousAutoFocus`: a hint about where to look, not an order to
+     * refocus. CameraX has no equivalent - `startFocusAndMetering` is the only
+     * way in, and it *triggers* an autofocus scan. Called on every analysed
+     * frame that would be worse than doing nothing, because an AF scan
+     * cancelled and restarted twenty times a second never converges, and the
+     * lens would hunt harder than if it were left alone.
+     *
+     * So it fires only when re-aiming would actually change something: the
+     * label has moved a real distance across the frame, or it has been long
+     * enough that the working distance has plausibly changed. A vial held still
+     * gets one scan and then silence, which is the behaviour Swift gets for
+     * free.
+     */
+    private fun steerFocus(boxes: List<NormRect>) {
+        if (!autoTextFocus || focusLocked || boxes.isEmpty()) return
+        val cx = boxes.sumOf { it.minX + it.width / 2 } / boxes.size
+        // The engine's boxes have their origin bottom-left, following Vision;
+        // the preview's is top-left. Flipping is the whole conversion.
+        val cy = 1.0 - boxes.sumOf { it.minY + it.height / 2 } / boxes.size
+
+        val now = System.currentTimeMillis()
+        val prev = lastFocusTarget
+        val moved = prev == null ||
+            kotlin.math.hypot(cx - prev.first, cy - prev.second) > 0.08
+        if (!moved && now - lastAutoFocus < 2_000) return
+        if (now - lastAutoFocus < 600) return
+        lastAutoFocus = now
+        lastFocusTarget = cx to cy
+
+        val view = previewView ?: return
+        val cam = camera ?: return
+        val pt = view.meteringPointFactory.createPoint(
+            cx.toFloat() * view.width, cy.toFloat() * view.height,
+        )
+        val action = FocusMeteringAction.Builder(
+            pt, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
+        ).disableAutoCancel().build()
+        runCatching { cam.cameraControl.startFocusAndMetering(action) }
     }
 
     private fun analyze(proxy: ImageProxy) {
@@ -177,6 +331,15 @@ class ScanController(private val store: AppStore) {
                 scanner = scanner,
             )
             state = currentEngine().ingest(frame)
+            // Only when the frame was actually read. The engine skips OCR on a
+            // blurred frame, and treating that silence as "no text here" would
+            // blink the overlay off and drop the focus target at exactly the
+            // moment focus is worst.
+            val boxes = frame.lastTextBoxes
+            if (boxes.isNotEmpty()) {
+                textBoxes = boxes
+                steerFocus(boxes)
+            }
         } finally {
             proxy.close()
         }

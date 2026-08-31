@@ -1,49 +1,100 @@
 package org.lji.vialscanner
 
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material.icons.filled.FlashOff
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Inventory2
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
+import androidx.compose.ui.unit.IntOffset
 import org.lji.vialcore.LabelField
+import org.lji.vialcore.NormRect
 import org.lji.vialcore.ScanResult
 import org.lji.vialcore.ScanState
 import org.lji.vialcore.Verdict
 
 /**
- * The main screen: viewfinder, live hints, the verdict, and the four things you
- * can do with it.
+ * The screen the app exists for. Same layout rules as `App/ScanView.swift`,
+ * because they came from watching people hold a vial in one hand: the
+ * viewfinder is always live and always visible, every control that matters sits
+ * in the bottom third where a thumb reaches, and the result never covers the
+ * aiming rectangle - it slides up underneath it, so the next vial can be lined
+ * up while the last one is still being decided.
  *
- * The four actions are the whole point of the app and are deliberately the same
- * four as on iOS: confirm (this vial is here), rescan, park for review, or
- * receive it as a new vial. `ScanResult.verdict` is the gate for which of them
- * is offered without a second thought.
+ * The chrome floats on the camera rather than sitting in a bar, so nothing
+ * borrows the preview's brightness: every control carries its own dark ground
+ * or its own white fill.
  */
 @Composable
-fun ScanScreen(store: AppStore, controller: ScanController, granted: Boolean) {
+fun ScanScreen(
+    store: AppStore,
+    controller: ScanController,
+    granted: Boolean,
+    openMenu: () -> Unit,
+    onRequestCamera: () -> Unit,
+) {
     val owner = LocalLifecycleOwner.current
     var showSessionBox by remember { mutableStateOf(false) }
     var receiving by remember { mutableStateOf<ItemRecord?>(null) }
     var flash by remember { mutableStateOf<String?>(null) }
 
     val state = controller.state
+    val idle = !controller.running
 
-    // Hands-free: commit the verdict on its own after a beat, so a run of vials
-    // never needs a tap. The delay is not cosmetic - it is the window in which a
-    // wrong answer can still be caught by the person holding the vial.
+    // The controller is not a composable and cannot read the store, so the one
+    // setting its focus logic needs is pushed to it whenever it changes.
+    LaunchedEffect(store.settings.autoTextFocus) {
+        controller.autoTextFocus = store.settings.autoTextFocus
+    }
+
+    // Hands-free: start the next scan on its own, so a run of vials never needs
+    // a tap to begin either.
+    LaunchedEffect(idle, store.settings.handsFree) {
+        if (idle && store.settings.handsFree) { delay(400); controller.rescan() }
+    }
+
+    // Hands-free: commit the verdict on its own after a beat. The delay is not
+    // cosmetic - it is the window in which a wrong answer can still be caught by
+    // the person holding the vial.
     LaunchedEffect(state) {
         val s = state
         if (s !is ScanState.Finished || !store.settings.handsFree) return@LaunchedEffect
@@ -57,7 +108,7 @@ fun ScanScreen(store: AppStore, controller: ScanController, granted: Boolean) {
             }
             store.settings.handsFreeParksUncertain && !r.readNothing -> {
                 park(store, r)
-                flash = "Parked for review"
+                flash = "Saved for review"
                 controller.rescan()
             }
             else -> controller.rescan()
@@ -66,10 +117,24 @@ fun ScanScreen(store: AppStore, controller: ScanController, granted: Boolean) {
 
     LaunchedEffect(flash) { if (flash != null) { delay(2500); flash = null } }
 
-    Box(Modifier.fillMaxSize().background(Ink.bg)) {
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (granted) {
             AndroidView(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    // Tap anywhere to aim focus, pinch to zoom. Both are on the
+                    // preview rather than on a control, because the hand that is
+                    // not holding the vial is the hand holding the phone.
+                    .pointerInput(Unit) {
+                        detectTapGestures { p ->
+                            controller.focusAt(p.x / size.width, p.y / size.height)
+                        }
+                    }
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, _, zoom, _ ->
+                            if (zoom != 1f) controller.zoomBy(zoom)
+                        }
+                    },
                 factory = { ctx ->
                     PreviewView(ctx).also { v ->
                         v.scaleType = PreviewView.ScaleType.FILL_CENTER
@@ -77,72 +142,61 @@ fun ScanScreen(store: AppStore, controller: ScanController, granted: Boolean) {
                     }
                 },
             )
-            // The reticle is not decoration: recognition is restricted to it, so
-            // it is drawn where the region of interest actually is.
-            val inset = store.settings.roiInset.toFloat().coerceIn(0f, 0.4f)
-            // Doubled, dark outside white, for the same reason the chips carry
-            // their own ground: a single white hairline is invisible against a
-            // white vial label, which is the one thing this box is always
-            // drawn over.
-            Box(
-                Modifier
-                    .fillMaxWidth(1f - 2 * inset)
-                    .fillMaxHeight(1f - 2.6f * inset)
-                    .align(Alignment.Center)
-                    .border(4.dp, Color.Black.copy(alpha = 0.35f))
-                    .padding(2.dp)
-                    .border(2.dp, Color.White.copy(alpha = 0.85f))
-            )
+            Reticle(store.settings.roiInset.toFloat(), active = !idle && state is ScanState.Scanning)
+            TextLockOverlay(controller.textBoxes, controller.focusLocked)
+            FocusRing(controller.focusPoint, controller.focusLocked)
         } else {
-            EmptyState("Camera permission is needed to scan vials.")
+            PermissionPane(onRequestCamera)
         }
 
-        // Top bar: session box and torch.
-        Row(
-            Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
-            val box = store.activeSessionBox
-            // These sit on top of the camera, whose brightness is whatever the
-            // user is pointing at. A default AssistChip is a transparent
-            // container with dim grey text, which disappears entirely against a
-            // pale label or a lit bench, so both chips carry their own dark
-            // ground rather than borrowing the preview's.
-            OverlayChip(box ?: "Set box") { showSessionBox = true }
+            TopBar(store, controller, openMenu) { showSessionBox = true }
             Spacer(Modifier.weight(1f))
-            OverlayChip(if (controller.torchOn) "Torch on" else "Torch") { controller.toggleTorch() }
-        }
 
-        flash?.let {
-            Surface(
-                color = Ink.good,
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 64.dp),
-            ) { Text(it, color = Color.Black, modifier = Modifier.padding(10.dp), fontWeight = FontWeight.SemiBold) }
-        }
+            if (granted && state !is ScanState.Finished) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    ZoomBar(controller)
+                }
+                Spacer(Modifier.height(12.dp))
+            }
 
-        Surface(
-            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
-            color = Ink.card,
-        ) {
-            Column(Modifier.padding(16.dp).heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                when (state) {
-                    is ScanState.Scanning -> ScanningPanel(state, store, controller)
-                    is ScanState.Finished -> ResultPanel(
-                        r = state.result,
-                        store = store,
-                        onConfirm = { flash = confirm(store, state.result); controller.rescan() },
-                        onPark = { park(store, state.result); flash = "Parked for review"; controller.rescan() },
-                        onReceive = { receiving = draftFrom(store, state.result) },
-                        onRescan = { controller.rescan() },
-                    )
+            when {
+                state is ScanState.Finished -> ResultPanel(
+                    r = state.result,
+                    store = store,
+                    onConfirm = { flash = confirm(store, state.result); controller.rescan() },
+                    onPark = { park(store, state.result); flash = "Saved for review"; controller.rescan() },
+                    onReceive = { receiving = draftFrom(store, state.result) },
+                    onRescan = { controller.rescan() },
+                )
+                idle -> IdleControls(store) { controller.rescan() }
+                else -> ScanningControls(state as ScanState.Scanning) {
+                    controller.finishNow()
                 }
             }
         }
+
+        flash?.let {
+            Text(
+                it,
+                color = Color.Black,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = Type.label,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = 64.dp)
+                    .clip(CircleShape)
+                    .background(Ink.good)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            )
+        }
     }
 
-    if (showSessionBox) {
-        SessionBoxSheet(store) { showSessionBox = false }
-    }
+    if (showSessionBox) SessionBoxSheet(store) { showSessionBox = false }
 
     receiving?.let { draft ->
         ReceiveSheet(
@@ -162,18 +216,341 @@ fun ScanScreen(store: AppStore, controller: ScanController, granted: Boolean) {
     }
 }
 
+// ---- Camera layer ----------------------------------------------------------
+
+/**
+ * The aiming rectangle. Not decoration: recognition is restricted to it, so it
+ * is drawn exactly where the region of interest is. Drawn dark-outside-white,
+ * because a single white hairline is invisible against a white vial label,
+ * which is the one thing this box is always drawn over.
+ */
 @Composable
-private fun ScanningPanel(state: ScanState.Scanning, store: AppStore, controller: ScanController) {
-    Text(state.hint, color = Ink.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-    Spacer(Modifier.height(8.dp))
-    LinearProgressIndicator(progress = { state.progress.toFloat() }, modifier = Modifier.fillMaxWidth())
-    Spacer(Modifier.height(8.dp))
-    Mono("frames ${state.framesSeen} · ocr ${state.ocrFrames} · views ${state.views} · ${store.items.size} vials on file")
-    Spacer(Modifier.height(10.dp))
-    OutlinedButton(onClick = { controller.finishNow() }, modifier = Modifier.fillMaxWidth()) {
-        Text("Answer with what you have")
+private fun BoxScope.Reticle(inset: Float, active: Boolean) {
+    val i = inset.coerceIn(0f, 0.4f)
+    val shape = RoundedCornerShape(28.dp)
+    val glow by rememberInfiniteTransition(label = "reticle").animateFloat(
+        initialValue = 0.55f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "glow",
+    )
+    Box(
+        Modifier
+            .fillMaxWidth(1f - 2 * i)
+            .fillMaxHeight(1f - 2.6f * i)
+            .align(Alignment.Center)
+            .border(4.dp, Color.Black.copy(alpha = 0.3f), shape)
+            .padding(2.dp)
+            .border(
+                2.dp,
+                if (active) OrbTop.copy(alpha = glow) else Color.White.copy(alpha = 0.85f),
+                shape,
+            )
+    )
+}
+
+@Composable
+private fun BoxScope.PermissionPane(onRequest: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(40.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(
+            Icons.Filled.CenterFocusStrong, null,
+            tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(40.dp),
+        )
+        Spacer(Modifier.height(16.dp))
+        Text("Camera access needed", color = Color.White, fontSize = Type.title, fontWeight = Type.titleWeight)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "The scanner reads the label and barcode straight from the camera. " +
+                "Nothing leaves the phone.",
+            color = Color.White.copy(alpha = 0.75f), fontSize = Type.label, textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(20.dp))
+        Text(
+            "Allow camera",
+            color = Color.Black, fontSize = Type.heading, fontWeight = Type.headingWeight,
+            modifier = Modifier
+                .clip(CircleShape).background(Color.White).clickable(onClick = onRequest)
+                .padding(horizontal = 22.dp, vertical = 13.dp),
+        )
     }
 }
+
+/**
+ * The boxes the recogniser is currently reading, matching Swift's
+ * `TextLockOverlay`.
+ *
+ * Worth the pixels because it answers the question the operator actually has
+ * when a scan is going badly: is the camera looking at the label at all? A
+ * blank frame here means reframe; boxes in the wrong place mean the reticle is
+ * over the neighbouring vial.
+ */
+@Composable
+private fun BoxScope.TextLockOverlay(boxes: List<NormRect>, locked: Boolean) {
+    if (boxes.isEmpty()) return
+    val tint = if (locked) Color.White else OrbTop
+    Canvas(Modifier.fillMaxSize()) {
+        for (b in boxes) {
+            // Engine boxes are bottom-left origin fractions of the frame; the
+            // canvas is top-left pixels.
+            val x = b.minX.toFloat() * size.width
+            val w = b.width.toFloat() * size.width
+            val h = b.height.toFloat() * size.height
+            val y = (1f - b.maxY.toFloat()) * size.height
+            drawRect(
+                color = tint.copy(alpha = 0.85f),
+                topLeft = Offset(x, y), size = Size(w, h),
+                style = Stroke(width = 2f),
+            )
+        }
+    }
+}
+
+/** The ring that says "focus went here". Fades itself out unless focus is
+ *  locked, in which case it stays as the only indication that it is. */
+@Composable
+private fun BoxScope.FocusRing(point: Pair<Float, Float>?, locked: Boolean) {
+    if (point == null) return
+    var visible by remember(point, locked) { mutableStateOf(true) }
+    LaunchedEffect(point, locked) {
+        visible = true
+        if (!locked) { delay(1200); visible = false }
+    }
+    if (!visible) return
+    val (fx, fy) = point
+    Canvas(Modifier.fillMaxSize()) {
+        val c = Offset(fx * size.width, fy * size.height)
+        val r = 34f
+        drawCircle(
+            color = if (locked) Color.White else Color.White.copy(alpha = 0.9f),
+            radius = r, center = c, style = Stroke(width = 2.5f),
+        )
+        drawCircle(color = Color.Black.copy(alpha = 0.25f), radius = r + 2.5f, center = c, style = Stroke(width = 2f))
+    }
+}
+
+/**
+ * The lens stops this phone offers. Hidden when there is only one, so a phone
+ * without an ultra-wide shows no dead control.
+ */
+@Composable
+private fun ZoomBar(controller: ScanController) {
+    if (controller.zoomOptions.size < 2) return
+    Row(
+        Modifier
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.42f))
+            .padding(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        for (z in controller.zoomOptions) {
+            val on = kotlin.math.abs(controller.zoomRatio - z) < 0.1f
+            Text(
+                if (z < 1f) "${'$'}{z}x" else "${'$'}{z.toInt()}x",
+                color = if (on) Color.Black else Color.White,
+                fontSize = Type.caption,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(if (on) Color.White else Color.Transparent)
+                    .clickable { controller.setZoom(z) }
+                    .padding(horizontal = 11.dp, vertical = 7.dp),
+            )
+        }
+    }
+}
+
+// ---- Top bar ---------------------------------------------------------------
+
+@Composable
+private fun TopBar(
+    store: AppStore,
+    controller: ScanController,
+    openMenu: () -> Unit,
+    onSessionBox: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        GlassCircleIcon(Icons.Filled.Menu, onClick = openMenu)
+        Spacer(Modifier.width(10.dp))
+
+        store.openAudit?.let { a ->
+            WhiteCapsule(Icons.Filled.Checklist, "${a.title} · ${a.foundSet.size}/${a.expected.size}") {}
+            Spacer(Modifier.width(10.dp))
+        }
+
+        // Always visible, because a stamp nobody can see is a stamp nobody can
+        // correct. Filled white while it is stamping, an outline while it is not.
+        val box = store.activeSessionBox
+        if (box != null) WhiteCapsule(Icons.Filled.Inventory2, box, onSessionBox)
+        else GlassCircleIcon(Icons.Filled.Inventory2, size = 40.dp, onClick = onSessionBox)
+
+        Spacer(Modifier.weight(1f))
+
+        // Focus lock sits beside the torch because they are the same kind of
+        // control: both are things you reach for when the read is going badly.
+        GlassCircleIcon(
+            if (controller.focusLocked) Icons.Filled.Lock else Icons.Filled.LockOpen,
+            active = controller.focusLocked,
+        ) { controller.toggleFocusLock() }
+        Spacer(Modifier.width(10.dp))
+
+        GlassCircleIcon(
+            if (controller.torchOn) Icons.Filled.FlashOn else Icons.Filled.FlashOff,
+            active = controller.torchOn,
+        ) { controller.toggleTorch() }
+    }
+}
+
+@Composable
+private fun WhiteCapsule(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .height(34.dp).clip(CircleShape).background(Color.White)
+            .clickable(onClick = onClick).padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, tint = Color.Black, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(text, color = Color.Black, fontSize = Type.caption, fontWeight = FontWeight.SemiBold, maxLines = 1)
+    }
+}
+
+// ---- Idle ------------------------------------------------------------------
+
+@Composable
+private fun IdleControls(store: AppStore, onScan: () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        DarkCapsuleText(
+            if (store.settings.handsFree) "Hands-free - hold up the next vial"
+            else "Hold the vial in the frame and press scan"
+        )
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            GlassCircleIcon(
+                if (store.settings.handsFree) Icons.Filled.GraphicEq else Icons.Filled.TouchApp,
+                size = 50.dp, active = store.settings.handsFree,
+            ) { store.updateSettings { c -> c.copy(handsFree = !c.handsFree) } }
+
+            Spacer(Modifier.width(14.dp))
+            Shutter(onScan)
+            Spacer(Modifier.width(14.dp))
+
+            // Clip recording is the iOS slot here and is not ported yet; the
+            // space is held so the shutter stays under the thumb rather than
+            // sliding right the day it lands.
+            Spacer(Modifier.size(50.dp))
+        }
+    }
+}
+
+@Composable
+private fun Shutter(onClick: () -> Unit) {
+    Box(Modifier.size(86.dp), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.size(86.dp).clip(CircleShape)
+                .border(2.dp, Color.White.copy(alpha = 0.6f), CircleShape)
+        )
+        Box(
+            Modifier.size(74.dp).clip(CircleShape).background(Color.White).clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Filled.CenterFocusStrong, null, tint = Color.Black, modifier = Modifier.size(28.dp))
+        }
+    }
+}
+
+// ---- Scanning --------------------------------------------------------------
+
+@Composable
+private fun ScanningControls(state: ScanState.Scanning, onReadNow: () -> Unit) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(
+            Modifier.fillMaxWidth().clip(CircleShape).background(Color.Black.copy(alpha = 0.5f))
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Orb()
+            Spacer(Modifier.width(10.dp))
+            Text(state.hint, color = Color.White, fontSize = Type.body, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "${state.ocrFrames} reads",
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = Type.caption, fontFamily = Type.monoFamily,
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+
+        // The bar tracks readiness to answer, not frames burned: elapsed time,
+        // OCR passes and how much of the label has actually been turned into
+        // view. A bar that fills at a fixed rate tells the user nothing about
+        // whether rotating further would help.
+        LinearProgressIndicator(
+            progress = { state.progress.toFloat() },
+            color = Color.White, trackColor = Color.White.copy(alpha = 0.25f),
+            modifier = Modifier.fillMaxWidth(0.8f).height(3.dp),
+        )
+        Spacer(Modifier.height(12.dp))
+
+        // Faces of the label seen so far. This is the one piece of engine state
+        // worth showing outright: "keep rotating" is a nag, but a pip that
+        // lights up when a new side registers tells the user what the scanner is
+        // actually waiting for.
+        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            repeat(3) { i ->
+                Box(
+                    Modifier.width(16.dp).height(3.dp).clip(CircleShape)
+                        .background(Color.White.copy(alpha = if (i < state.views) 0.95f else 0.25f))
+                )
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+
+        Text(
+            "Read what you have",
+            color = Color.Black, fontSize = Type.label, fontWeight = Type.labelWeight,
+            modifier = Modifier
+                .clip(CircleShape).background(Color.White).clickable(onClick = onReadNow)
+                .padding(horizontal = 20.dp, vertical = 12.dp),
+        )
+    }
+}
+
+/** The pulsing gradient dot iOS uses to say "the engine is working". */
+@Composable
+private fun Orb() {
+    val t = rememberInfiniteTransition(label = "orb")
+    val s by t.animateFloat(
+        initialValue = 0.7f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse), label = "pulse",
+    )
+    Box(
+        Modifier.size(22.dp * s).clip(CircleShape)
+            .background(Brush.verticalGradient(listOf(OrbTop, OrbBottom)))
+    )
+}
+
+@Composable
+private fun DarkCapsuleText(text: String) {
+    Text(
+        text,
+        color = Color.White.copy(alpha = 0.85f), fontSize = Type.label, fontWeight = Type.labelWeight,
+        modifier = Modifier
+            .clip(CircleShape).background(Color.Black.copy(alpha = 0.38f))
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
+}
+
+// ---- Result ----------------------------------------------------------------
 
 @Composable
 private fun ResultPanel(
@@ -184,60 +561,72 @@ private fun ResultPanel(
     onReceive: () -> Unit,
     onRescan: () -> Unit,
 ) {
-    val (badge, color) = when {
-        r.readNothing -> "NOTHING READ" to Ink.dim
-        r.verdict == Verdict.CERTAIN -> "CERTAIN" to Ink.good
-        r.verdict == Verdict.CONFIDENT -> "CONFIDENT" to Ink.good
-        r.verdict == Verdict.AMBIGUOUS -> "NEEDS REVIEW" to Ink.warn
-        else -> "NEW VIAL" to Ink.info
-    }
-    Text(badge, color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-    Spacer(Modifier.height(4.dp))
+    // The result is a themed card on the camera, not another glass overlay: once
+    // there is an answer to read the page stops being a viewfinder.
+    Card(Modifier.heightIn(max = 460.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            val tint = when (r.verdict) {
+                Verdict.CERTAIN, Verdict.CONFIDENT -> Ink.good
+                Verdict.AMBIGUOUS -> Ink.warn
+                Verdict.NOT_FOUND -> Ink.accent
+            }
+            val headline = if (r.readNothing) "Nothing read" else when (r.verdict) {
+                Verdict.CERTAIN, Verdict.CONFIDENT -> "Identified"
+                Verdict.AMBIGUOUS -> "Not sure"
+                Verdict.NOT_FOUND -> "New vial"
+            }
+            val sub = if (r.readNothing) "The camera never read the label" else when (r.verdict) {
+                Verdict.CERTAIN -> "Matched by barcode"
+                Verdict.CONFIDENT -> "Matched from label text"
+                Verdict.AMBIGUOUS -> "Best guess - confirm before use"
+                Verdict.NOT_FOUND -> "Nothing on file matches this label"
+            }
 
-    val def = r.definition
-    if (def != null) {
-        Text(def.name, color = Ink.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-        Text("${def.vendor} ${def.catalog} · clone ${def.clone}", color = Ink.dim, fontSize = 14.sp)
-    } else {
-        Text(
-            if (r.readNothing) "The camera never read the label" else "Nothing on file matches this label",
-            color = Ink.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
-        )
-    }
+            Text(headline, color = tint, fontSize = Type.display, fontWeight = Type.displayWeight)
+            Text(sub, color = Ink.textSecond, fontSize = Type.label)
+            Spacer(Modifier.height(14.dp))
 
-    val vial = r.vial
-    if (vial != null) {
-        Spacer(Modifier.height(8.dp))
-        KeyValueRow("AbNo", vial.abNo)
-        KeyValueRow("lot", vial.lot)
-        KeyValueRow("where", listOf(vial.location, vial.box).filter { it.isNotEmpty() }.joinToString(" · "))
-        KeyValueRow("conc", vial.concentration)
-        KeyValueRow("owner", vial.owner)
-        if (r.otherVials.isNotEmpty()) {
-            KeyValueRow("also on file", r.otherVials.joinToString(", ") { "AbNo ${it.abNo}" })
+            r.definition?.let { def ->
+                Text(def.name, color = Ink.text, fontSize = Type.title, fontWeight = Type.titleWeight)
+                Text(
+                    "${def.vendor} ${def.catalog} · clone ${def.clone}",
+                    color = Ink.textSecond, fontSize = Type.label,
+                )
+            }
+
+            val vial = r.vial
+            if (vial != null) {
+                Spacer(Modifier.height(12.dp))
+                KeyValueRow("AbNo", vial.abNo)
+                KeyValueRow("lot", vial.lot)
+                KeyValueRow("where", listOf(vial.location, vial.box).filter { it.isNotEmpty() }.joinToString(" · "))
+                KeyValueRow("conc", vial.concentration)
+                KeyValueRow("owner", vial.owner)
+                if (r.otherVials.isNotEmpty()) {
+                    KeyValueRow("also on file", r.otherVials.joinToString(", ") { "AbNo ${it.abNo}" })
+                }
+            } else if (r.lotNotOnRecord) {
+                Spacer(Modifier.height(12.dp))
+                Text("Lot not on record - a new lot of a known antibody", color = Ink.warn, fontSize = Type.label)
+                Mono(r.otherVials.joinToString(", ") { "AbNo ${it.abNo} lot ${it.lot}" })
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Mono(LabelField.entries.mapNotNull { f -> r.fields[f]?.let { "$f=$it" } }.joinToString("  "))
+            Mono(r.reasons.joinToString(", "))
+            store.activeSessionBox?.let { Mono("will file to box $it", Ink.accent) }
+
+            Spacer(Modifier.height(16.dp))
+            if (vial != null) {
+                PrimaryButton("Confirm this vial is here", onClick = onConfirm)
+                Spacer(Modifier.height(10.dp))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SecondaryButton("Rescan", Modifier.weight(1f), onRescan)
+                SecondaryButton("Review later", Modifier.weight(1f), onPark)
+                SecondaryButton("Receive", Modifier.weight(1f), onReceive)
+            }
         }
-    } else if (r.lotNotOnRecord) {
-        Spacer(Modifier.height(8.dp))
-        Text("Lot not on record - a new lot of a known antibody", color = Ink.warn, fontSize = 14.sp)
-        Mono(r.otherVials.joinToString(", ") { "AbNo ${it.abNo} lot ${it.lot}" })
-    }
-
-    Spacer(Modifier.height(8.dp))
-    Mono(LabelField.entries.mapNotNull { f -> r.fields[f]?.let { "$f=$it" } }.joinToString("  "))
-    Mono(r.reasons.joinToString(", "))
-    store.activeSessionBox?.let { Mono("will file to box $it", Ink.info) }
-
-    Spacer(Modifier.height(12.dp))
-    if (vial != null) {
-        Button(onClick = onConfirm, modifier = Modifier.fillMaxWidth()) { Text("Confirm this vial is here") }
-        Spacer(Modifier.height(6.dp))
-    }
-    Row {
-        OutlinedButton(onClick = onRescan, modifier = Modifier.weight(1f)) { Text("Rescan") }
-        Spacer(Modifier.width(6.dp))
-        OutlinedButton(onClick = onPark, modifier = Modifier.weight(1f)) { Text("Review later") }
-        Spacer(Modifier.width(6.dp))
-        OutlinedButton(onClick = onReceive, modifier = Modifier.weight(1f)) { Text("Receive") }
     }
 }
 
@@ -311,14 +700,3 @@ fun draftFrom(store: AppStore, r: ScanResult): ItemRecord = ItemRecord(
     box = store.activeSessionBox ?: store.settings.defaultBox,
     owner = store.settings.defaultOwner,
 )
-
-/** A chip legible over an arbitrary camera image. */
-@Composable
-private fun OverlayChip(label: String, onClick: () -> Unit) {
-    AssistChip(
-        onClick = onClick,
-        label = { Text(label, color = Ink.text) },
-        colors = AssistChipDefaults.assistChipColors(containerColor = Ink.bg.copy(alpha = 0.72f)),
-        border = BorderStroke(1.dp, Ink.text.copy(alpha = 0.45f)),
-    )
-}

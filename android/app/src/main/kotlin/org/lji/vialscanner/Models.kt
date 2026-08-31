@@ -245,6 +245,11 @@ data class AppSettings(
     var handsFreeParksUncertain: Boolean = true,
     var haptics: Boolean = true,
     var torchOnByDefault: Boolean = false,
+    /** Steer focus at the label text instead of at the middle of the frame. */
+    var autoTextFocus: Boolean = true,
+    /** Start on the ultra-wide lens, which focuses far closer than the main one.
+     *  Off by default: it is the softer sensor, and it only wins up close. */
+    var preferUltraWideZoom: Boolean = false,
     var defaultOwner: String = "",
     var defaultLocation: String = "",
     var defaultBox: String = "",
