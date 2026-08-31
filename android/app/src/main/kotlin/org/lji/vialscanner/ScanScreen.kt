@@ -28,6 +28,8 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -91,6 +93,15 @@ fun ScanScreen(
     var receiving by remember { mutableStateOf<ItemRecord?>(null) }
     var flash by remember { mutableStateOf<String?>(null) }
 
+    // Per-scan clip toggle. Seeded from "always keep" once, like Swift's
+    // `.onAppear { keepClip = store.settings.alwaysKeepClips }`, so the toggle
+    // starts wherever the setting says but is still a live per-scan decision.
+    var keepClip by remember { mutableStateOf(store.settings.alwaysKeepClips) }
+    // Recomputed fresh on every recomposition, so a setting flipped mid-run
+    // (hands-free turned on, "always keep" turned on) applies to the next scan
+    // rather than waiting for the app to restart.
+    val recordThisScan = keepClip || store.settings.alwaysKeepClips || store.settings.handsFree
+
     val state = controller.state
     val idle = !controller.running
 
@@ -103,7 +114,7 @@ fun ScanScreen(
     // Hands-free: start the next scan on its own, so a run of vials never needs
     // a tap to begin either.
     LaunchedEffect(idle, store.settings.handsFree) {
-        if (idle && store.settings.handsFree) { delay(400); controller.rescan() }
+        if (idle && store.settings.handsFree) { delay(400); controller.rescan(recordThisScan) }
     }
 
     // A result landing is worth a buzz whether or not hands-free is on - it is
@@ -128,15 +139,18 @@ fun ScanScreen(
         if (controller.state !== s) return@LaunchedEffect
         when {
             meetsBar(r.verdict, store.settings.autoCommit) && r.vial != null -> {
-                flash = confirm(store, r)
-                controller.rescan()
+                flash = confirm(store, controller, r, keepClip)
+                controller.rescan(recordThisScan)
             }
             store.settings.handsFreeParksUncertain && !r.readNothing -> {
-                park(store, r)
+                park(store, controller, r)
                 flash = "Saved for review"
-                controller.rescan()
+                controller.rescan(recordThisScan)
             }
-            else -> controller.rescan()
+            else -> {
+                dismiss(store, controller, r)
+                controller.rescan(recordThisScan)
+            }
         }
     }
 
@@ -197,12 +211,31 @@ fun ScanScreen(
                 state is ScanState.Finished -> ResultPanel(
                     r = state.result,
                     store = store,
-                    onConfirm = { flash = confirm(store, state.result); controller.rescan() },
-                    onPark = { park(store, state.result); flash = "Saved for review"; controller.rescan() },
+                    onConfirm = {
+                        flash = confirm(store, controller, state.result, keepClip)
+                        controller.rescan(recordThisScan)
+                    },
+                    onPark = {
+                        park(store, controller, state.result)
+                        flash = "Saved for review"
+                        controller.rescan(recordThisScan)
+                    },
                     onReceive = { receiving = draftFrom(store, state.result) },
-                    onRescan = { controller.rescan() },
+                    onRescan = {
+                        dismiss(store, controller, state.result)
+                        controller.rescan(recordThisScan)
+                    },
                 )
-                idle -> IdleControls(store, tip) { Haptics.commit(); controller.rescan() }
+                idle -> IdleControls(
+                    store, controller, keepClip,
+                    onToggleKeepClip = {
+                        val turningOn = !keepClip
+                        keepClip = turningOn
+                        Haptics.tap()
+                        tip(if (turningOn) "Keeping a clip of the next scan" else "Not keeping clips")
+                    },
+                    tip,
+                ) { Haptics.commit(); controller.rescan(recordThisScan) }
                 else -> ScanningControls(state as ScanState.Scanning) {
                     controller.finishNow()
                 }
@@ -236,12 +269,13 @@ fun ScanScreen(
             onSaved = { saved ->
                 val s = controller.state
                 if (s is ScanState.Finished) {
-                    store.log(record(s.result, ScanOutcome.RECEIVED).copy(abNo = saved.abNo))
+                    val clip = attachClip(store, controller, s.result, keepClip || store.settings.alwaysKeepClips)
+                    store.log(record(s.result, ScanOutcome.RECEIVED, clip).copy(abNo = saved.abNo))
                 }
                 receiving = null
                 flash = "Received AbNo ${saved.abNo}"
                 Haptics.commit()
-                controller.rescan()
+                controller.rescan(recordThisScan)
             },
         )
     }
@@ -494,7 +528,14 @@ private fun WhiteCapsule(icon: androidx.compose.ui.graphics.vector.ImageVector, 
 // ---- Idle ------------------------------------------------------------------
 
 @Composable
-private fun IdleControls(store: AppStore, tip: (String) -> Unit, onScan: () -> Unit) {
+private fun IdleControls(
+    store: AppStore,
+    controller: ScanController,
+    keepClip: Boolean,
+    onToggleKeepClip: () -> Unit,
+    tip: (String) -> Unit,
+    onScan: () -> Unit,
+) {
     Column(
         Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -530,10 +571,20 @@ private fun IdleControls(store: AppStore, tip: (String) -> Unit, onScan: () -> U
             Shutter(onScan)
             Spacer(Modifier.width(14.dp))
 
-            // Clip recording is the iOS slot here and is not ported yet; the
-            // space is held so the shutter stays under the thumb rather than
-            // sliding right the day it lands.
-            Spacer(Modifier.size(50.dp))
+            // "Always keep" and hands-free both force recording regardless of
+            // this toggle (see `recordThisScan` in `ScanScreen`), so the icon
+            // reflects the effective state even when the operator cannot turn
+            // it off - same as Swift always showing "video.fill" in that case.
+            val effectivelyOn = keepClip || store.settings.alwaysKeepClips || store.settings.handsFree
+            GlassCircleIcon(
+                if (effectivelyOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+                size = 50.dp, active = effectivelyOn,
+            ) {
+                // Nothing to toggle if binding VideoCapture failed on this
+                // device - the icon still reflects the (unreachable) setting
+                // rather than lying about it.
+                if (!controller.clipRecordingUnsupported) onToggleKeepClip()
+            }
         }
     }
 }
@@ -723,7 +774,7 @@ private fun meetsBar(v: Verdict, bar: Verdict): Boolean {
     return (rank[v] ?: 0) >= (rank[bar] ?: 2)
 }
 
-fun record(r: ScanResult, outcome: ScanOutcome): ScanRecord = ScanRecord(
+fun record(r: ScanResult, outcome: ScanOutcome, clipFile: String? = null): ScanRecord = ScanRecord(
     verdict = r.verdict.name,
     outcome = outcome,
     abNo = r.vial?.abNo,
@@ -738,17 +789,70 @@ fun record(r: ScanResult, outcome: ScanOutcome): ScanRecord = ScanRecord(
     reasons = r.reasons,
     framesUsed = r.framesUsed,
     lotNotOnRecord = r.lotNotOnRecord,
+    clipFile = clipFile,
 )
+
+// ---- Clips ------------------------------------------------------------
+
+/**
+ * Move the just-recorded temp file into permanent storage and write its
+ * diagnostic sidecar, or discard it. `wantsKeep` folds together the per-scan
+ * toggle and "always keep clips" - callers pass the already-decided value so
+ * this function only has to act on it.
+ */
+private fun attachClip(store: AppStore, controller: ScanController, r: ScanResult, wantsKeep: Boolean): String? {
+    val temp = if (wantsKeep) controller.consumePendingClip() else null
+    val name = store.keepClip(temp)
+    if (name == null) controller.discardPendingClip() else store.writeClipMetadata(name, clipMetadata(store, controller, r))
+    return name
+}
+
+/**
+ * Everything a reviewer would need to make sense of the clip without the app:
+ * what the engine concluded, what fed that, and the conditions the frames were
+ * shot under. See `ClipMetadata`'s doc for what is deliberately left out.
+ */
+private fun clipMetadata(store: AppStore, controller: ScanController, r: ScanResult): ClipMetadata {
+    val bc = r.barcode
+    val s = store.settings
+    return ClipMetadata(
+        verdict = r.verdict.name,
+        definitionName = r.definition?.name,
+        abNo = r.vial?.abNo,
+        score = r.score,
+        margin = r.margin,
+        reasons = r.reasons,
+        fields = r.fields.entries.associate { (field, value) -> field.name to value },
+        barcode = bc?.let { BarcodeMetadata(raw = it.raw, symbology = it.symbology, catalog = it.catalog, lot = it.lot) },
+        capture = CaptureMetadata(
+            zoomRatio = controller.zoomRatio,
+            torchOn = controller.torchOn,
+            focusLocked = controller.focusLocked,
+            framesSeen = controller.lastFramesSeen,
+            ocrFramesUsed = controller.lastOcrFrames,
+            roiInset = s.roiInset,
+            maxOCRFrames = s.maxOCRFrames,
+            minScanSeconds = s.minScanSeconds,
+            maxScanSeconds = s.maxScanSeconds,
+        ),
+        device = DeviceMetadata(
+            model = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}",
+            androidVersion = android.os.Build.VERSION.RELEASE ?: android.os.Build.VERSION.SDK_INT.toString(),
+            appVersion = BuildConfig.VERSION_NAME,
+        ),
+    )
+}
 
 /**
  * Confirm: the vial was physically seen. Returns the banner text, which names
  * the box when the session box actually filed it somewhere new - a stamp nobody
  * can see is a stamp nobody can correct.
  */
-private fun confirm(store: AppStore, r: ScanResult): String {
-    val abNo = r.vial?.abNo ?: return "Nothing to confirm"
+private fun confirm(store: AppStore, controller: ScanController, r: ScanResult, keepClip: Boolean): String {
+    val abNo = r.vial?.abNo ?: run { controller.discardPendingClip(); return "Nothing to confirm" }
+    val clip = attachClip(store, controller, r, keepClip || store.settings.alwaysKeepClips)
     val open = store.openAudit
-    val logged = store.log(record(r, ScanOutcome.CONFIRMED).copy(auditID = open?.id))
+    val logged = store.log(record(r, ScanOutcome.CONFIRMED, clip).copy(auditID = open?.id))
     store.markConfirmed(abNo, logged.id)
     val filed = store.stampSessionBox(abNo)
     if (open != null) store.recordFound(abNo, open.id, method = "scan", scanID = logged.id)
@@ -759,8 +863,12 @@ private fun confirm(store: AppStore, r: ScanResult): String {
     return text
 }
 
-private fun park(store: AppStore, r: ScanResult) {
-    store.log(record(r, ScanOutcome.REVIEW))
+/** A parked scan always keeps its video, whatever the toggle says - that is
+ *  the point of parking: someone else has to be able to see what the camera
+ *  saw. Mirrors Swift's `park()`. */
+private fun park(store: AppStore, controller: ScanController, r: ScanResult) {
+    val clip = attachClip(store, controller, r, wantsKeep = true)
+    store.log(record(r, ScanOutcome.REVIEW, clip))
     Haptics.commit()
     // A scan the audit could not name is still evidence that something was in
     // the drawer, so record it as an unexpected item rather than dropping it.
@@ -774,6 +882,23 @@ private fun park(store: AppStore, r: ScanResult) {
             ),
             open.id,
         )
+    }
+}
+
+/**
+ * The operator (or a hands-free pass that met no bar) walked away from a
+ * result without confirming or parking it. Swift's `reject()` always throws
+ * the clip away; "always keep clips" overrides that here, on purpose - a NEW
+ * VIAL or an uncorroborated read nobody acted on is exactly the failure a
+ * labelling run needs the video for. A blank read carries no verdict worth
+ * keeping a row for, so it is skipped either way, same as Swift.
+ */
+private fun dismiss(store: AppStore, controller: ScanController, r: ScanResult) {
+    if (store.settings.alwaysKeepClips && !r.readNothing) {
+        val clip = attachClip(store, controller, r, wantsKeep = true)
+        if (clip != null) store.log(record(r, ScanOutcome.REJECTED, clip))
+    } else {
+        controller.discardPendingClip()
     }
 }
 
