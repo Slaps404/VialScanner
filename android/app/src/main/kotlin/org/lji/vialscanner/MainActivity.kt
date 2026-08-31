@@ -72,7 +72,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AppStore(applicationContext)
-        controller = ScanController(store)
+        controller = ScanController(store, applicationContext)
         // Both need a real Context handed in once before anything calls them -
         // see the class doc in Feedback.kt for why that differs from iOS.
         Haptics.init(applicationContext)

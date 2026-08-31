@@ -69,7 +69,7 @@ class AppStore(private val context: Context) {
 
     private val storeFile: File get() = File(context.filesDir, "store.json")
 
-    init { load() }
+    init { load(); purgeExpiredClips() }
 
     // ---- Load / save --------------------------------------------------------
 
@@ -264,7 +264,87 @@ class AppStore(private val context: Context) {
     }
 
     fun delete(record: ScanRecord) {
+        record.clipFile?.let { deleteClip(it) }
         scans = scans.filter { it.id != record.id }
+        save()
+    }
+
+    // ---- Clips ---------------------------------------------------------------
+
+    /** Clips live in app-private storage rather than `store.json`'s directory:
+     *  same idea as Swift keeping them in Documents, a much bigger blob that a
+     *  backup/restore of the JSON document should not have to carry. */
+    private val clipsDir: File get() = File(context.filesDir, "Clips").apply { mkdirs() }
+
+    fun clipFile(name: String): File = File(clipsDir, name)
+
+    private fun sidecarFile(clipName: String): File =
+        File(clipsDir, clipName.substringBeforeLast('.', clipName) + ".json")
+
+    /** Move a just-recorded temp file into permanent storage. Returns the
+     *  stored filename, or null when there was nothing to keep. */
+    fun keepClip(temp: File?): String? {
+        if (temp == null || !temp.exists()) return null
+        val name = "scan-${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(4)}.mp4"
+        val dest = clipFile(name)
+        return runCatching {
+            if (!temp.renameTo(dest)) {
+                temp.copyTo(dest, overwrite = true)
+                temp.delete()
+            }
+            name
+        }.getOrElse {
+            banner = Banner("Could not save the clip: ${it.message}", isError = true)
+            null
+        }
+    }
+
+    /** Writes the diagnostic sidecar for a kept clip. Best-effort: a scan's
+     *  video is worth keeping even if, somehow, its metadata cannot be. */
+    fun writeClipMetadata(clipName: String, metadata: ClipMetadata) {
+        val text = runCatching { json.encodeToString(metadata) }.getOrNull() ?: return
+        runCatching { sidecarFile(clipName).writeText(text) }
+    }
+
+    fun deleteClip(name: String) {
+        runCatching { clipFile(name).delete() }
+        runCatching { sidecarFile(name).delete() }
+    }
+
+    val clipBytes: Long
+        get() {
+            val names = scans.mapNotNull { it.clipFile }.toSet()
+            return names.sumOf { clipFile(it).length() }
+        }
+
+    /** Clips age out, but never while their scan is still waiting on a human. */
+    fun purgeExpiredClips() {
+        val days = settings.clipRetentionDays
+        if (days <= 0) return // 0 means never purge - see AppSettings.clipRetentionDays.
+        val cutoff = System.currentTimeMillis() - days * 86_400_000L
+        var changed = false
+        scans = scans.map { s ->
+            val clip = s.clipFile
+            if (clip != null && s.date < cutoff &&
+                !(s.outcome == ScanOutcome.REVIEW && s.resolvedAt == null)
+            ) {
+                deleteClip(clip)
+                changed = true
+                s.copy(clipFile = null)
+            } else s
+        }
+        if (changed) save()
+    }
+
+    fun purgeAllClips() {
+        scans = scans.map {
+            if (it.clipFile != null) {
+                deleteClip(it.clipFile!!)
+                it.copy(clipFile = null)
+            } else it
+        }
+        // Anything orphaned by a crash goes too.
+        clipsDir.listFiles()?.forEach { it.delete() }
         save()
     }
 
@@ -464,14 +544,14 @@ class AppStore(private val context: Context) {
         val rows = ArrayList<List<String>>()
         rows.add(listOf(
             "When", "Verdict", "Outcome", "AbNo", "Antibody", "Catalog", "Lot",
-            "Barcode", "Score", "Margin", "Frames", "Lot not on record", "Note", "Why",
+            "Barcode", "Score", "Margin", "Frames", "Lot not on record", "Clip", "Note", "Why",
         ))
         for (s in scans) {
             rows.add(listOf(
                 stamp(s.date), s.verdict, s.outcome.name, s.abNo ?: "",
                 s.definitionName ?: "", s.catalog ?: "", s.lot ?: "", s.barcode ?: "",
                 "%.1f".format(s.score), "%.1f".format(s.margin),
-                s.framesUsed.toString(), if (s.lotNotOnRecord) "yes" else "",
+                s.framesUsed.toString(), if (s.lotNotOnRecord) "yes" else "", s.clipFile ?: "",
                 s.note, s.reasons.joinToString("; "),
             ))
         }

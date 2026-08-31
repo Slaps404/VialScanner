@@ -354,9 +354,56 @@ fun DataScreen(
             SectionCard("Restore") {
                 SecondaryButton("Restore from a backup file", Modifier.fillMaxWidth(), onClick = onPickBackup)
             }
+
+            SectionCard("Clips") {
+                var confirmPurge by remember { mutableStateOf(false) }
+                KeyValueRow("Kept clips", store.scans.count { it.clipFile != null }.toString())
+                KeyValueRow("On disk", formatBytes(store.clipBytes))
+                KeyValueRow(
+                    "Auto-delete after",
+                    if (store.settings.clipRetentionDays > 0) "${store.settings.clipRetentionDays} days" else "never",
+                )
+                Text(
+                    "Clips attached to an unresolved review are never auto-deleted.",
+                    color = Ink.textSecond, fontSize = Type.caption,
+                )
+                Spacer(Modifier.height(10.dp))
+                SecondaryButton("Delete every clip", Modifier.fillMaxWidth()) { confirmPurge = true }
+                if (confirmPurge) {
+                    AlertDialog(
+                        onDismissRequest = { confirmPurge = false },
+                        title = { Text("Delete every clip?") },
+                        text = {
+                            Text(
+                                "Scan records stay; the videos attached to them are removed, " +
+                                    "including ones still waiting for review.",
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                store.purgeAllClips()
+                                store.banner = AppStore.Banner("All clips deleted")
+                                confirmPurge = false
+                            }) { Text("Delete") }
+                        },
+                        dismissButton = { TextButton(onClick = { confirmPurge = false }) { Text("Keep") } },
+                    )
+                }
+            }
             Spacer(Modifier.height(Metric.pad))
         }
     }
+}
+
+/** iOS reaches for `ByteCountFormatter`; this is the same "file" style in the
+ *  units a phone's storage settings already use. */
+private fun formatBytes(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val units = listOf("KB", "MB", "GB")
+    var value = bytes / 1024.0
+    var unit = 0
+    while (value >= 1024 && unit < units.lastIndex) { value /= 1024; unit++ }
+    return "%.1f %s".format(value, units[unit])
 }
 
 @Composable
@@ -474,6 +521,20 @@ fun SettingsScreen(store: AppStore, openMenu: () -> Unit) {
                     "A different buzz for identified, unsure, and new.",
                     s.haptics,
                 ) { store.updateSettings { c -> c.copy(haptics = it) } }
+            }
+
+            SectionCard("Camera & clips") {
+                ToggleRow(
+                    "Always keep clips",
+                    "Keeps the video for every scan, not just parked ones.",
+                    s.alwaysKeepClips,
+                ) { store.updateSettings { c -> c.copy(alwaysKeepClips = it) } }
+
+                SettingRow("Delete clips after", "Saved scans keep theirs until they are resolved.")
+                PillRow(
+                    listOf(0, 7, 30, 90), s.clipRetentionDays,
+                    { if (it == 0) "Never" else "${it}d" },
+                ) { store.updateSettings { c -> c.copy(clipRetentionDays = it) } }
             }
             Spacer(Modifier.height(Metric.pad))
         }

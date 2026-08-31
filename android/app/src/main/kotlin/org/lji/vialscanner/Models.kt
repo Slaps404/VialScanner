@@ -156,6 +156,9 @@ data class ScanRecord(
     var note: String = "",
     var auditID: String? = null,
     var resolvedAt: Long? = null,
+    /** Filename under the Clips directory, or null when this scan's video was
+     *  never recorded or was thrown away. Mirrors Swift's `ScanRecord.clipFile`. */
+    var clipFile: String? = null,
 ) {
     val verdictValue: Verdict
         get() = runCatching { Verdict.valueOf(verdict) }.getOrDefault(Verdict.NOT_FOUND)
@@ -255,6 +258,12 @@ data class AppSettings(
     var defaultOwner: String = "",
     var defaultLocation: String = "",
     var defaultBox: String = "",
+    /** Keeps the video for every scan, not just parked ones. */
+    var alwaysKeepClips: Boolean = false,
+    /** Days before a kept clip is auto-deleted. 0 means never - the labelling
+     *  runs this app is built for depend on that being a real "never", not a
+     *  very long default. */
+    var clipRetentionDays: Int = 30,
     /** The box currently being worked through. Every vial confirmed while this
      *  is set gets stamped with it, which is the only realistic way the Box
      *  column ever gets filled in: it is 11% populated in the export and nobody
@@ -289,3 +298,62 @@ data class AppSettings(
         return c
     }
 }
+
+// MARK: - Clip diagnostics
+
+/**
+ * Sidecar written next to a kept clip (same basename, `.json`) so the video
+ * can be understood without the app: what the engine concluded, what it read
+ * to get there, and the conditions the frame was captured under. Written for
+ * every clip that gets kept, including scans nobody confirmed or parked - a
+ * NEW VIAL or a result the operator waved past is exactly the failure nobody
+ * can reproduce later without this.
+ *
+ * Does not carry raw OCR lines: `ScanEngine`/`MlKitFrame` (in `:vialcore` and
+ * this module) consume recognised text into `LabelField` values and discard
+ * the source strings, so the lines never reach anything outside the engine.
+ * Recovering them would mean plumbing new state through `:vialcore`, which is
+ * out of bounds for this change - see the port notes for `ClipRecorder.kt`.
+ */
+@Serializable
+data class ClipMetadata(
+    val verdict: String,
+    val definitionName: String? = null,
+    val abNo: String? = null,
+    val score: Double,
+    val margin: Double,
+    val reasons: List<String>,
+    /** `LabelField` name to the value the engine extracted for it. */
+    val fields: Map<String, String>,
+    val barcode: BarcodeMetadata? = null,
+    val capture: CaptureMetadata,
+    val device: DeviceMetadata,
+)
+
+@Serializable
+data class BarcodeMetadata(
+    val raw: String,
+    val symbology: String,
+    val catalog: String? = null,
+    val lot: String? = null,
+)
+
+@Serializable
+data class CaptureMetadata(
+    val zoomRatio: Float,
+    val torchOn: Boolean,
+    val focusLocked: Boolean,
+    val framesSeen: Int,
+    val ocrFramesUsed: Int,
+    val roiInset: Double,
+    val maxOCRFrames: Int,
+    val minScanSeconds: Double,
+    val maxScanSeconds: Double,
+)
+
+@Serializable
+data class DeviceMetadata(
+    val model: String,
+    val androidVersion: String,
+    val appVersion: String,
+)
