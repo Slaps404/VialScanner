@@ -20,6 +20,8 @@ struct ScanView: View {
     @State private var showNewVial = false
     @State private var showSessionBox = false
     @State private var newVialDraft = ItemRecord(abNo: "")
+    @State private var newVialPrefillDef: DefRecord? = nil
+    @State private var newVialSources: [String: FieldSource] = [:]
     @State private var keepClip = false
     @State private var countdown: Double = 0
     @State private var countdownTotal: Double = 1
@@ -70,7 +72,7 @@ struct ScanView: View {
             SessionBoxSheet().environmentObject(store)
         }
         .sheet(isPresented: $showNewVial) {
-            NewVialSheet(draft: $newVialDraft) { saved in
+            NewVialSheet(draft: $newVialDraft, prefillDefinition: newVialPrefillDef, sources: newVialSources) { saved in
                 receive(saved)
             }
             .environmentObject(store)
@@ -630,18 +632,61 @@ struct ScanView: View {
     private func startReceive(_ result: ScanResult) {
         cancelAuto()
         var draft = ItemRecord(abNo: store.nextAbNo())
+        var sources: [String: FieldSource] = [:]
+
         draft.definitionName = result.definition?.name ?? ""
         draft.lot = result.fields[.lot] ?? result.barcode?.lot ?? ""
+        if !draft.lot.isEmpty { sources["Lot"] = result.barcode?.lot != nil ? .barcode : .ocr }
         draft.concentration = result.fields[.concentration] ?? ""
+        if !draft.concentration.isEmpty { sources["Concentration"] = .ocr }
+
+        // Remembered rather than blank: the freezer drawer someone is standing
+        // in front of is almost always the one they used last time, and a box
+        // being worked through beats either.
         draft.owner = store.settings.defaultOwner
+        if !draft.owner.isEmpty { sources["Owner"] = .remembered }
         draft.location = store.settings.defaultLocation
-        // A vial received mid-run belongs in the box being worked through, not
-        // in whatever the receiving default says.
+        if !draft.location.isEmpty { sources["Location"] = .remembered }
         draft.box = store.activeSessionBox ?? store.settings.defaultBox
-        draft.vialName = result.definition?.name ?? (result.fields[.catalog].map { "Cat \($0)" } ?? "")
+        if !draft.box.isEmpty { sources["Box"] = .remembered }
+
+        // NEW VIAL is the common outcome, not the edge case: 31 of 39 sample
+        // clips end here. Build the definition the scan already read enough
+        // for instead of leaving `vialName` as a "Cat 12345" placeholder that
+        // someone has to notice and go fix by hand.
+        if result.definition == nil {
+            newVialPrefillDef = definitionDraft(from: result, sources: &sources)
+            draft.vialName = newVialPrefillDef?.name ?? ""
+        } else {
+            newVialPrefillDef = nil
+            draft.vialName = result.definition!.name
+        }
+
+        newVialSources = sources
         draft.notes = receivingNote(result)
         newVialDraft = draft
         showNewVial = true
+    }
+
+    /// A `DefRecord` built from whatever the scan managed to read, so the
+    /// operator is correcting OCR mistakes rather than retyping a label from
+    /// scratch. `sources` is filled in alongside so the definition sheet can
+    /// show the same barcode/OCR badges the vial sheet does.
+    private func definitionDraft(from result: ScanResult, sources: inout [String: FieldSource]) -> DefRecord? {
+        let catalog = result.fields[.catalog] ?? result.barcode?.catalog ?? ""
+        let clone = result.fields[.clone] ?? ""
+        let vendor = result.fields[.vendor] ?? ""
+        let isotype = result.fields[.isotype] ?? ""
+        guard !catalog.isEmpty || !clone.isEmpty || !vendor.isEmpty else { return nil }
+
+        if !catalog.isEmpty { sources["Catalog #"] = result.barcode?.catalog != nil ? .barcode : .ocr }
+        if !clone.isEmpty { sources["Clone"] = .ocr }
+        if !isotype.isEmpty { sources["Isotype"] = .ocr }
+        if !vendor.isEmpty { sources["Vendor"] = .ocr }
+
+        var name = [vendor, clone.isEmpty ? nil : "Clone \(clone)"].compactMap { $0 }.joined(separator: " ")
+        if name.isEmpty { name = catalog.isEmpty ? "" : "Cat \(catalog)" }
+        return DefRecord(name: name, clone: clone, isotype: isotype, vendor: vendor, catalog: catalog, isLocal: true)
     }
 
     private func receivingNote(_ result: ScanResult) -> String {
@@ -665,9 +710,20 @@ struct ScanView: View {
         record.definitionName = item.definitionName
         let logged = store.log(record)
         store.markConfirmed(abNo: item.abNo, scanID: logged.id)
+        rememberReceivingDefaults(item)
         store.banner = AppStore.Banner(text: "AbNo \(item.abNo) received into inventory")
         Haptics.commit()
         afterCommit()
+    }
+
+    /// Whatever owner/location/box just got typed in becomes next scan's
+    /// default. A lab receiving ten vials in a row types the same drawer ten
+    /// times without this; a box already being worked through still wins, see
+    /// `AppStore.activeSessionBox`.
+    private func rememberReceivingDefaults(_ item: ItemRecord) {
+        if !item.owner.isEmpty { store.settings.defaultOwner = item.owner }
+        if !item.location.isEmpty { store.settings.defaultLocation = item.location }
+        if store.activeSessionBox == nil, !item.box.isEmpty { store.settings.defaultBox = item.box }
     }
 
     /// After anything is committed: keep the line moving in hands-free, go back
