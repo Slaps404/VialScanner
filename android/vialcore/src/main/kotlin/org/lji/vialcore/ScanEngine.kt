@@ -41,7 +41,9 @@ class EngineConfig {
     /** Run the barcode pass on every Nth frame. Codes stay in view for many
      *  consecutive frames, so sampling costs almost no decode opportunities. */
     var barcodeEveryNthFrame = 2
-    /** Cap how many frames ever reach OCR; the sample set resolved on 4-5. */
+    /** Cap how many frames ever reach OCR; the sample set resolved on 4-5.
+     *  Only passes that come back with usable text are charged against this
+     *  cap: a budget spent on empty bench is a budget the label never gets. */
     var maxOCRFrames = 24
     /** Minimum gap between OCR passes, so a fast shutter cannot flood the queue. */
     var minOCRInterval: Double = 0.15
@@ -139,6 +141,9 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
     private var extensionsGranted = 0
     private var latestTextBoxes: List<NormRect> = emptyList()
 
+    /** Consecutive OCR passes that came back with no usable text. */
+    private var emptyOCRRun = 0
+
     fun reset() {
         evidence = EvidenceBuffer()
         framesSeen = 0; ocrFrames = 0
@@ -149,6 +154,7 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
         ocrBudget = config.maxOCRFrames
         extensionsGranted = 0
         latestTextBoxes = emptyList()
+        emptyOCRRun = 0
     }
 
     fun ingest(frame: VialFrame): ScanState {
@@ -208,10 +214,28 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
 
         if (sharpEnough && paced && budget) {
             lastOCRTime = frame.timestamp
-            ocrFrames += 1
             val obs = frame.recognizeText(config.regionOfInterest)
                 .filter { it.confidence > 0.3f }
             latestTextBoxes = obs.mapNotNull { it.boundingBox }
+            // Charge the budget only for a pass that actually read something.
+            // `maxOCRFrames` is the reserve a hard-to-read label needs, and it
+            // used to be spent on whatever the camera happened to be pointed at
+            // first: a vial that read only `CATALOG=143302 VENDOR=BioLegend`
+            // came back NOT_FOUND having burned all 24 passes on bench, floor
+            // and glove. An empty pass still moves `lastOCRTime`, so it cannot
+            // flood, and still counts in `framesSeen`.
+            if (obs.isEmpty()) {
+                emptyOCRRun += 1
+            } else {
+                emptyOCRRun = 0
+                ocrFrames += 1
+            }
+            // The empty frame is still fed to the buffer. `addFrame` already
+            // refuses to count a frame that read nothing towards
+            // `framesSinceNewToken`, so this cannot fake saturation into
+            // triggering; dropping it would only desync `frameCount` (reported
+            // as `framesUsed`, and the "Line the label up" hint) from the passes
+            // that were actually run.
             evidence.addFrame(obs)
 
             if (ocrFrames >= config.earlyExitMinFrames &&

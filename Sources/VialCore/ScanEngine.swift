@@ -17,7 +17,9 @@ public struct EngineConfig: Sendable {
     /// many consecutive frames, so sampling costs almost no decode opportunities.
     public var barcodeEveryNthFrame = 2
     /// OCR is the expensive tier (~69 ms at half-res). Cap how many frames ever
-    /// reach it; the sample set resolved reliably on 4–5.
+    /// reach it; the sample set resolved reliably on 4–5. Only passes that
+    /// come back with usable text are charged against this cap: a budget spent
+    /// on empty bench is a budget the label never gets.
     public var maxOCRFrames = 24
     /// Minimum gap between OCR passes, so a fast shutter cannot flood the queue.
     public var minOCRInterval: Double = 0.15
@@ -132,6 +134,8 @@ public final class ScanEngine {
     private let textRequest: VNRecognizeTextRequest
     private let barcodeRequest: VNDetectBarcodesRequest
     private var latestTextBoxes: [CGRect] = []
+    /// Consecutive OCR passes that came back with no usable text.
+    private var emptyOCRRun = 0
 
     // ---- Offline capture hooks ------------------------------------------
     //
@@ -182,6 +186,7 @@ public final class ScanEngine {
         ocrBudget = config.maxOCRFrames
         extensionsGranted = 0
         latestTextBoxes = []
+        emptyOCRRun = 0
     }
 
     @discardableResult
@@ -248,7 +253,6 @@ public final class ScanEngine {
 
         if sharpEnough, paced, budget, let handler = frame.halfResHandler() {
             lastOCRTime = frame.timestamp
-            ocrFrames += 1
             try? handler.perform([textRequest])
             let roi = config.regionOfInterest ?? CGRect(x: 0, y: 0, width: 1, height: 1)
             let obs = (textRequest.results ?? []).compactMap { o -> TextObservation? in
@@ -262,6 +266,27 @@ public final class ScanEngine {
                 return TextObservation(text: c.string, confidence: c.confidence, boundingBox: box)
             }
             latestTextBoxes = obs.compactMap(\.boundingBox)
+            // Charge the budget only for a pass that actually read something.
+            // `maxOCRFrames` is the reserve a hard-to-read label needs, and it
+            // used to be spent on whatever the camera happened to be pointed
+            // at first: a vial that read only `CATALOG=143302
+            // VENDOR=BioLegend` came back NOT_FOUND having burned all 24
+            // passes on bench, floor and glove. An empty pass still moves
+            // `lastOCRTime`, so it cannot flood, and still counts in
+            // `framesSeen`.
+            if obs.isEmpty {
+                emptyOCRRun += 1
+            } else {
+                emptyOCRRun = 0
+                ocrFrames += 1
+            }
+            // The empty frame is still fed to the buffer. `addFrame` already
+            // refuses to count a frame that read nothing towards
+            // `framesSinceNewToken`, so this cannot fake saturation into
+            // triggering; dropping it would only desync `frameCount` (reported
+            // as `framesUsed`, and the "Line the label up" hint) from the
+            // passes that were actually run, and would drop the frame from the
+            // recorded tape the Kotlin port replays.
             evidence.addFrame(obs)
             onOCRFrame?(obs)
 
