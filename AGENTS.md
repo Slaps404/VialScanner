@@ -67,3 +67,10 @@ actually run one of the above.
   `android/README.md`.
 
 See README.md for full validation results, thresholds, and known gaps.
+
+## Style
+
+- Keep code comments short. A comment earns its place by saying *why*, in a
+  line or two. If a decision needs paragraphs of justification, it belongs in
+  README.md or CODEMAP.md with a one-line pointer from the code, not inlined.
+- No em-dashes in code comments or docs.
