@@ -36,20 +36,57 @@ struct GlassCircleIcon: View {
     let systemName: String
     var size: CGFloat = 44
     var active: Bool = false
+    /// Fill when on. Defaults to white, the neutral "this is engaged"
+    /// treatment; the clip toggle overrides it to red so recording does not
+    /// look like every other engaged control.
+    var activeColor: Color = .white
+    /// Icon tint when on. Picked off the fill by the caller rather than
+    /// hard-coded, so a dark `activeColor` still reads.
+    var activeIconColor: Color = .black
     var action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: size * 0.40, weight: .medium))
-                .foregroundStyle(active ? .black : .white)
+                .foregroundStyle(active ? activeIconColor : .white)
                 .frame(width: size, height: size)
                 .background(
-                    Circle().fill(active ? Color.white : Color.black.opacity(0.42))
+                    Circle().fill(active ? activeColor : Color.black.opacity(0.42))
                 )
                 .overlay(Circle().strokeBorder(Color.white.opacity(active ? 0 : 0.22), lineWidth: 1))
         }
         .buttonStyle(PressScale())
+    }
+}
+
+/// A round toggle with its state written underneath.
+///
+/// The two controls flanking the shutter used to say nothing: on was a white
+/// circle, off was a grey one, and which was which is only obvious if you
+/// already know. The caption is the state, not the control's name, so there is
+/// nothing to infer - and it is what makes "am I recording?" answerable without
+/// tapping to find out.
+struct CaptionedToggle: View {
+    let systemName: String
+    let caption: String
+    var active: Bool = false
+    var activeColor: Color = .white
+    var activeIconColor: Color = .black
+    var action: () -> Void
+
+    var body: some View {
+        VStack(spacing: 4) {
+            GlassCircleIcon(systemName: systemName, size: 50, active: active,
+                            activeColor: activeColor, activeIconColor: activeIconColor,
+                            action: action)
+            Text(caption)
+                .font(.system(size: 12, weight: active ? .semibold : .regular))
+                .foregroundStyle(active ? activeColor : .white.opacity(0.65))
+                .lineLimit(1)
+        }
+        // Fixed width so the row does not shift when the caption changes length.
+        .frame(width: 92)
     }
 }
 

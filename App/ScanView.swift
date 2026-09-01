@@ -331,21 +331,47 @@ struct ScanView: View {
                 }
                 .buttonStyle(PressScale())
 
-                GlassCircleIcon(systemName: keepClip ? "video.fill" : "video.slash",
-                                size: 50, active: keepClip) {
-                    keepClip.toggle()
-                    Haptics.tap()
-                    flash(keepClip ? "Keeping a clip of the next scan" : "Not keeping clips")
-                }
+                clipToggle
             }
             .frame(maxWidth: .infinity)
             .padding(.bottom, 4)
         }
     }
 
+    /// "Always keep clips" and hands-free both force recording regardless of
+    /// this toggle (see `record` in `beginScan`), so the icon and caption
+    /// reflect the effective state even when the operator cannot turn it off.
+    /// Red rather than the default white fill: this is the one control on the
+    /// bar that decides whether video is written, and "on" for it should not
+    /// look like "on" for hands-free next to it.
+    private var clipToggle: some View {
+        let forcedOn = store.settings.alwaysKeepClips || store.settings.handsFree
+        let effectivelyOn = keepClip || forcedOn
+        return CaptionedToggle(
+            systemName: effectivelyOn ? "video.fill" : "video.slash",
+            caption: forcedOn ? "Clip always" : (keepClip ? "Clip on" : "Clip off"),
+            active: effectivelyOn,
+            activeColor: Theme.bad,
+            activeIconColor: .white
+        ) {
+            Haptics.tap()
+            // Say which setting is holding it on rather than silently doing
+            // nothing when the tap cannot turn it off.
+            if forcedOn {
+                flash(store.settings.handsFree
+                      ? "Hands-free always keeps a clip"
+                      : "\"Always keep clips\" is on in Settings")
+            } else {
+                keepClip.toggle()
+                flash(keepClip ? "Keeping a clip of the next scan" : "Not keeping clips")
+            }
+        }
+    }
+
     private var handsFreeToggle: some View {
-        GlassCircleIcon(systemName: store.settings.handsFree ? "waveform" : "hand.tap",
-                        size: 50, active: store.settings.handsFree) {
+        CaptionedToggle(systemName: store.settings.handsFree ? "waveform" : "hand.tap",
+                        caption: store.settings.handsFree ? "Hands-free" : "Manual",
+                        active: store.settings.handsFree) {
             store.settings.handsFree.toggle()
             Haptics.tap()
             flash(store.settings.handsFree
