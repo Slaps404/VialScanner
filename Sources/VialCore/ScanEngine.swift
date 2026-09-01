@@ -23,6 +23,38 @@ public struct EngineConfig: Sendable {
     public var maxOCRFrames = 24
     /// Minimum gap between OCR passes, so a fast shutter cannot flood the queue.
     public var minOCRInterval: Double = 0.15
+
+    // ---- Empty-frame backoff --------------------------------------------
+    //
+    // Nothing above asks whether there is a label in frame before paying for
+    // an OCR pass, and nothing can: OCR *is* the text detector here, so the
+    // question costs exactly as much as the answer. An extra detector was
+    // measured and ruled out. What is free is the result of the passes already
+    // run, and a run of them that read nothing is the cheapest available
+    // evidence that the camera is pointed at bench, floor or glove. So the
+    // engine idles instead of grinding at full rate, and snaps back to full
+    // rate on the first pass that reads anything at all.
+
+    /// Consecutive OCR passes that read nothing before the pacing interval
+    /// starts widening. Small on purpose: three passes at 0.15 s is under half
+    /// a second of looking at nothing.
+    public var emptyOCRFramesBeforeBackoff = 3
+    /// The pacing interval is multiplied by this once per empty pass past the
+    /// threshold. 1.0 or less disables the backoff.
+    public var ocrBackoffFactor: Double = 1.6
+    /// Ceiling on the widened interval. The engine must still look often enough
+    /// that a label brought into frame is picked up without a visible stall:
+    /// 0.6 s is a bit over one pass a second at the floor.
+    public var maxOCRInterval: Double = 0.6
+    /// Back off only during the lead-in, before any pass has read text.
+    /// Measured on the 39-clip corpus: applying the backoff throughout also
+    /// throttles the runs of empty passes that happen *while* a label is in
+    /// frame (a blurred turn, a stretch of bare glass), and that cost verdicts
+    /// - IMG_4081 confident -> new-vial, IMG_4078 ambiguous -> new-vial. Before
+    /// the first read there is no such risk: there is nothing to lose evidence
+    /// on. Set false to let the backoff apply throughout, so the harness can
+    /// sweep it.
+    public var backoffOnlyBeforeFirstText = true
     /// Frames below this fraction of the best sharpness seen are skipped.
     public var sharpnessRatio: Double = 0.45
     /// Stop as soon as the result is certain (barcode) — no reason to keep going.
@@ -239,7 +271,7 @@ public final class ScanEngine {
         // Pacing and budget are checked *before* sharpness, because measuring
         // sharpness costs ~4 ms and there is no reason to pay it on a frame that
         // could not be OCR'd anyway.
-        let paced = frame.timestamp - lastOCRTime >= config.minOCRInterval
+        let paced = frame.timestamp - lastOCRTime >= ocrInterval
         let budget = ocrFrames < ocrBudget
         var sharpEnough = true
         if paced, budget {
@@ -322,6 +354,18 @@ public final class ScanEngine {
                          progress: progress(elapsed: elapsed),
                          hint: hint(paced: paced, budget: budget, sharpEnough: sharpEnough),
                          textBoxes: latestTextBoxes)
+    }
+
+    /// Pacing interval as it currently stands: `minOCRInterval` while text is
+    /// coming back, widened geometrically once a run of passes has read
+    /// nothing, capped at `maxOCRInterval`. This is the "is a label in view"
+    /// gate, built from the only signal that is free.
+    private var ocrInterval: Double {
+        if config.backoffOnlyBeforeFirstText, ocrFrames > 0 { return config.minOCRInterval }
+        let over = emptyOCRRun - config.emptyOCRFramesBeforeBackoff + 1
+        guard over > 0, config.ocrBackoffFactor > 1 else { return config.minOCRInterval }
+        return min(config.maxOCRInterval,
+                   config.minOCRInterval * pow(config.ocrBackoffFactor, Double(over)))
     }
 
     /// Has the user shown the engine more than one face of the label — or run

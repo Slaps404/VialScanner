@@ -1,5 +1,7 @@
 package org.lji.vialcore
 
+import kotlin.math.pow
+
 /**
  * One camera frame, as far as the engine is concerned.
  *
@@ -47,6 +49,38 @@ class EngineConfig {
     var maxOCRFrames = 24
     /** Minimum gap between OCR passes, so a fast shutter cannot flood the queue. */
     var minOCRInterval: Double = 0.15
+
+    // ---- Empty-frame backoff ------------------------------------------------
+    //
+    // Nothing above asks whether there is a label in frame before paying for an
+    // OCR pass, and nothing can: OCR *is* the text detector here, so the
+    // question costs exactly as much as the answer. An extra detector was
+    // measured and ruled out. What is free is the result of the passes already
+    // run, and a run of them that read nothing is the cheapest available
+    // evidence that the camera is pointed at bench, floor or glove. So the
+    // engine idles instead of grinding at full rate, and snaps back to full rate
+    // on the first pass that reads anything at all.
+
+    /** Consecutive OCR passes that read nothing before the pacing interval
+     *  starts widening. Small on purpose: three passes at 0.15 s is under half a
+     *  second of looking at nothing. */
+    var emptyOCRFramesBeforeBackoff = 3
+    /** The pacing interval is multiplied by this once per empty pass past the
+     *  threshold. 1.0 or less disables the backoff. */
+    var ocrBackoffFactor: Double = 1.6
+    /** Ceiling on the widened interval. The engine must still look often enough
+     *  that a label brought into frame is picked up without a visible stall:
+     *  0.6 s is a bit over one pass a second at the floor. */
+    var maxOCRInterval: Double = 0.6
+    /** Back off only during the lead-in, before any pass has read text.
+     *  Measured on the 39-clip corpus: applying the backoff throughout also
+     *  throttles the runs of empty passes that happen *while* a label is in
+     *  frame (a blurred turn, a stretch of bare glass), and that cost verdicts -
+     *  IMG_4081 confident -> new-vial, IMG_4078 ambiguous -> new-vial. Before
+     *  the first read there is no such risk: there is nothing to lose evidence
+     *  on. Set false to let the backoff apply throughout, so the harness can
+     *  sweep it. */
+    var backoffOnlyBeforeFirstText = true
     /** Frames below this fraction of the best sharpness seen are skipped. */
     var sharpnessRatio: Double = 0.45
     var earlyExitOnBarcode = true
@@ -200,7 +234,7 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
         // Pacing and budget are checked *before* sharpness, because measuring
         // sharpness costs real milliseconds and there is no reason to pay it on
         // a frame that could not be OCR'd anyway.
-        val paced = frame.timestamp - lastOCRTime >= config.minOCRInterval
+        val paced = frame.timestamp - lastOCRTime >= ocrInterval
         val budget = ocrFrames < ocrBudget
         var sharpEnough = true
         if (paced && budget) {
@@ -273,6 +307,21 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
             textBoxes = latestTextBoxes,
         )
     }
+
+    /** Pacing interval as it currently stands: `minOCRInterval` while text is
+     *  coming back, widened geometrically once a run of passes has read nothing,
+     *  capped at `maxOCRInterval`. This is the "is a label in view" gate, built
+     *  from the only signal that is free. */
+    private val ocrInterval: Double
+        get() {
+            if (config.backoffOnlyBeforeFirstText && ocrFrames > 0) return config.minOCRInterval
+            val over = emptyOCRRun - config.emptyOCRFramesBeforeBackoff + 1
+            if (over <= 0 || config.ocrBackoffFactor <= 1.0) return config.minOCRInterval
+            return minOf(
+                config.maxOCRInterval,
+                config.minOCRInterval * config.ocrBackoffFactor.pow(over),
+            )
+        }
 
     /** Has the user shown more than one face of the label - or run the visible
      *  face dry? */
