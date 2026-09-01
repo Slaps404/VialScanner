@@ -586,9 +586,10 @@ private fun IdleControls(
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            GlassCircleIcon(
+            CaptionedToggle(
                 if (store.settings.handsFree) Icons.Filled.GraphicEq else Icons.Filled.TouchApp,
-                size = 50.dp, active = store.settings.handsFree,
+                caption = if (store.settings.handsFree) "Hands-free" else "Manual",
+                active = store.settings.handsFree,
             ) {
                 Haptics.tap()
                 val turningOn = !store.settings.handsFree
@@ -611,17 +612,75 @@ private fun IdleControls(
             // this toggle (see `recordThisScan` in `ScanScreen`), so the icon
             // reflects the effective state even when the operator cannot turn
             // it off - same as Swift always showing "video.fill" in that case.
-            val effectivelyOn = keepClip || store.settings.alwaysKeepClips || store.settings.handsFree
-            GlassCircleIcon(
+            val forcedOn = store.settings.alwaysKeepClips || store.settings.handsFree
+            val effectivelyOn = keepClip || forcedOn
+            CaptionedToggle(
                 if (effectivelyOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                size = 50.dp, active = effectivelyOn,
+                caption = if (forcedOn) "Clip always" else if (keepClip) "Clip on" else "Clip off",
+                active = effectivelyOn,
+                // Red rather than the default white: this is the one control on
+                // the bar that decides whether video is written, and "on" for it
+                // should not look like "on" for hands-free next to it.
+                activeColor = Ink.bad,
             ) {
                 // Nothing to toggle if binding VideoCapture failed on this
                 // device - the icon still reflects the (unreachable) setting
                 // rather than lying about it.
-                if (!controller.clipRecordingUnsupported) onToggleKeepClip()
+                if (controller.clipRecordingUnsupported) return@CaptionedToggle
+                Haptics.tap()
+                // Parity with Swift's `flash(...)` on this toggle, which Android
+                // was missing: the caption says the new state, the tip says what
+                // it means. Say nothing misleading when a setting is holding it
+                // on and the tap cannot turn it off.
+                if (forcedOn) {
+                    tip(
+                        if (store.settings.handsFree) "Hands-free always keeps a clip"
+                        else "\"Always keep clips\" is on in Settings"
+                    )
+                } else {
+                    onToggleKeepClip()
+                    tip(
+                        if (!keepClip) "Keeping a clip of the next scan"
+                        else "Not keeping clips"
+                    )
+                }
             }
         }
+    }
+}
+
+/**
+ * A round toggle with its state written underneath.
+ *
+ * The two controls flanking the shutter used to say nothing: on was a white
+ * circle, off was a grey one, and which was which is only obvious if you
+ * already know. The caption is the state, not the control's name, so there is
+ * nothing to infer - and it is what makes "am I recording?" answerable without
+ * tapping to find out.
+ */
+@Composable
+private fun CaptionedToggle(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    caption: String,
+    active: Boolean,
+    activeColor: Color = Color.White,
+    onClick: () -> Unit,
+) {
+    // Fixed width so the row does not shift when the caption changes length.
+    // Wide enough for the longest caption either toggle uses.
+    Column(
+        Modifier.width(92.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        GlassCircleIcon(icon, size = 50.dp, active = active, activeColor = activeColor, onClick = onClick)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            caption,
+            color = if (active) activeColor else Color.White.copy(alpha = 0.65f),
+            fontSize = Type.caption,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+        )
     }
 }
 

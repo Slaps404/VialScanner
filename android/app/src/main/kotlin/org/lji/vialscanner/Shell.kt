@@ -31,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -301,13 +302,17 @@ fun GlassCircleIcon(
     icon: ImageVector,
     size: androidx.compose.ui.unit.Dp = 44.dp,
     active: Boolean = false,
+    /// Fill when on. Defaults to white, which is the neutral "this is engaged"
+    /// treatment; the clip toggle overrides it to red so recording does not
+    /// look like every other engaged control.
+    activeColor: Color = Color.White,
     onClick: () -> Unit,
 ) {
     Box(
         Modifier
             .size(size)
             .clip(CircleShape)
-            .background(if (active) Color.White else Color.Black.copy(alpha = 0.42f))
+            .background(if (active) activeColor else Color.Black.copy(alpha = 0.42f))
             .then(
                 if (active) Modifier
                 else Modifier.border(1.dp, Color.White.copy(alpha = 0.22f), CircleShape)
@@ -317,7 +322,9 @@ fun GlassCircleIcon(
     ) {
         Icon(
             icon, null,
-            tint = if (active) Color.Black else Color.White,
+            // Picked off the fill rather than hard-coded, so a dark
+            // `activeColor` (the red clip toggle) still reads.
+            tint = if (active && activeColor.luminance() > 0.5f) Color.Black else Color.White,
             modifier = Modifier.size(size * 0.40f),
         )
     }
