@@ -38,8 +38,39 @@ internal fun isNumeral(c: Char): Boolean = when (Character.getType(c)) {
 /// so `e` + a combining acute is one character to Swift and two to Kotlin.
 /// Every distance below counts clusters, or the two platforms would score the
 /// same pair of strings differently.
+/// `BreakIterator.getCharacterInstance()` is not a cheap accessor: on Android it
+/// builds an ICU rule-based iterator, measured at roughly 290us a time on a
+/// Pixel 5a against a few microseconds on desktop OpenJDK. `graphemes` was
+/// constructing one per call, four calls per `similarity`, so Tier 3 of the
+/// matcher spent 5.8 SECONDS on 5096 comparisons of an 8-token bag. Cache it.
+/// `BreakIterator` is stateful and not thread safe, hence per thread and not
+/// a shared singleton: the analyser thread and the replay harness both call this.
+private val characterBreaker: ThreadLocal<BreakIterator> =
+    ThreadLocal.withInitial { BreakIterator.getCharacterInstance() }
+
+/// True when every char is printable ASCII, in which case each char is its own
+/// grapheme cluster and ICU has nothing to contribute. Control characters are
+/// excluded deliberately rather than lazily: ICU joins CR LF into a *single*
+/// cluster, so `\r` must not take this path. Catalog numbers, clones and lot
+/// codes are all in this set, which is why it is worth having.
+private fun isPlainAscii(s: String): Boolean {
+    for (c in s) if (c < ' ' || c > '~') return false
+    return true
+}
+
+/// Cluster count without building the list. Every caller that only wanted
+/// `graphemes(x).size` was allocating a list of single-char strings to throw
+/// it away.
+internal fun graphemeCount(s: String): Int =
+    if (isPlainAscii(s)) s.length else graphemes(s).size
+
 internal fun graphemes(s: String): List<String> {
-    val it = BreakIterator.getCharacterInstance()
+    if (isPlainAscii(s)) {
+        val out = ArrayList<String>(s.length)
+        for (c in s) out.add(c.toString())
+        return out
+    }
+    val it = characterBreaker.get()
     it.setText(s)
     val out = ArrayList<String>(s.length)
     var start = it.first()
@@ -71,8 +102,11 @@ fun ocrFold(s: String): String = buildString {
 
 fun editDistance(a: String, b: String): Int {
     if (a == b) return 0
-    if (a.isEmpty()) return graphemes(b).size
-    if (b.isEmpty()) return graphemes(a).size
+    if (a.isEmpty()) return graphemeCount(b)
+    if (b.isEmpty()) return graphemeCount(a)
+    // Both plain ASCII means one cluster per char, so the DP can run straight
+    // over the chars and skip two list allocations per call.
+    if (isPlainAscii(a) && isPlainAscii(b)) return editDistanceAscii(a, b)
     val ga = graphemes(a)
     val gb = graphemes(b)
     var prev = IntArray(gb.size + 1) { it }
@@ -91,10 +125,30 @@ fun editDistance(a: String, b: String): Int {
     return prev[gb.size]
 }
 
+/// Levenshtein over chars. Only correct when both strings are plain ASCII, so
+/// only `editDistance` may call it, after checking.
+private fun editDistanceAscii(a: String, b: String): Int {
+    var prev = IntArray(b.length + 1) { it }
+    var cur = IntArray(b.length + 1)
+    for (i in 1..a.length) {
+        cur[0] = i
+        val ca = a[i - 1]
+        for (j in 1..b.length) {
+            cur[j] = minOf(
+                prev[j] + 1,
+                cur[j - 1] + 1,
+                prev[j - 1] + if (ca == b[j - 1]) 0 else 1
+            )
+        }
+        val t = prev; prev = cur; cur = t
+    }
+    return prev[b.length]
+}
+
 fun similarity(a: String, b: String): Double {
     if (a == b) return 1.0
     if (a.isEmpty() || b.isEmpty()) return 0.0
-    val len = maxOf(graphemes(a).size, graphemes(b).size)
+    val len = maxOf(graphemeCount(a), graphemeCount(b))
     return 1.0 - editDistance(a, b).toDouble() / len.toDouble()
 }
 
@@ -123,10 +177,13 @@ fun differsOnlyInLastCharacter(a: String, b: String): Boolean {
 /// only kind of difference the parity test is allowed to see.
 fun bestFuzzy(needle: String, hay: Collection<String>): Pair<String, Double>? {
     var best: Pair<String, Double>? = null
+    // Hoisted: the needle does not change across the loop, and this used to be
+    // re-measured once per candidate.
+    val needleLen = graphemeCount(needle)
     for (t in hay.sorted()) {
         // Length gate keeps this cheap: edit distance cannot beat the threshold
         // if the lengths are already too far apart.
-        if (kotlin.math.abs(graphemes(t).size - graphemes(needle).size) > 3) continue
+        if (kotlin.math.abs(graphemeCount(t) - needleLen) > 3) continue
         val s = similarity(needle, t)
         if (s > (best?.second ?: 0.0)) best = t to s
     }
