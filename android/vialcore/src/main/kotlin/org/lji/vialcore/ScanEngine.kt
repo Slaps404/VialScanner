@@ -274,7 +274,12 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
         if (elapsed >= deadline) {
             val r = matcher.resolve(evidence)
             // Only stop on the deadline if there is something to stop *with*.
-            if (r.evidenceLevel == EvidenceLevel.SUFFICIENT ||
+            // SUFFICIENT means retrievable fields were read, not that they
+            // retrieved anything, so a non-answer still spends an extension:
+            // the rest of the label is hidden around the curve of the vial.
+            val answered = r.evidenceLevel == EvidenceLevel.SUFFICIENT &&
+                (r.verdict == Verdict.CERTAIN || r.verdict == Verdict.CONFIDENT)
+            if (answered ||
                 extensionsGranted >= config.maxExtensions ||
                 elapsed + config.graceExtension > config.hardScanCeiling
             ) {

@@ -325,7 +325,12 @@ public final class ScanEngine {
             let r = matcher.resolve(evidence)
             lastStandard = .best
             // Only stop on the deadline if there is something to stop *with*.
-            if r.evidenceLevel == .sufficient
+            // `.sufficient` means retrievable fields were read, not that they
+            // retrieved anything, so a non-answer still spends an extension:
+            // the rest of the label is hidden around the curve of the vial.
+            let answered = r.evidenceLevel == .sufficient
+                && (r.verdict == .certain || r.verdict == .confident)
+            if answered
                 || extensionsGranted >= config.maxExtensions
                 || elapsed + config.graceExtension > config.hardScanCeiling {
                 settled = r
