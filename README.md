@@ -134,6 +134,54 @@ Five tiers, first hit wins:
    absolute score and a margin over the runner-up.
 5. Otherwise **new vial**.
 
+## Two goals, opposite stopping rules
+
+The scanner does two jobs and they want opposite things from a scan:
+
+| | Identify (vial is in the catalog) | Catalogue (vial is new) |
+|---|---|---|
+| Target | margin clears | every field captured |
+| Completeness | waste, stop early | the entire point |
+| Partial reads | noise, reject | valuable, keep |
+| Right stop | as soon as margin clears | when fields stop arriving |
+
+The trap: the engine cannot know which mode it is in until it has read enough
+to establish the vial is *not* in the catalog. So the sequence is identify
+first, and on `NOT_FOUND` switch to harvesting fields. Only the first half of
+that exists today (see *Known gaps*).
+
+"Know when it has read every field" is not achievable and is not the goal for
+the identify path. Absence of new text is indistinguishable from text not yet
+rotated into view, so no rule can be built on it. What is observable is
+discriminating power: `margin = top.score - runnerUp` in `Matcher.resolve`.
+For the catalogue path completeness *is* the target, and there the right signal
+is whether new tokens are still arriving (`framesSinceNewToken`).
+
+## When a scan stops
+
+Three paths, and only these:
+
+| Path | Trigger | Category |
+|---|---|---|
+| Barcode early exit | barcode decoded and resolved | got it |
+| Text early exit | CERTAIN or CONFIDENT, same answer twice | got it |
+| Deadline | both grace extensions spent, or 12 s ceiling | timed out |
+
+`maxOCRFrames` is **not** a stop path. It only gates whether OCR runs on a
+given frame; a scan out of OCR budget coasts to the deadline decoding barcodes.
+
+Timeout is 4.0 s plus two 2.5 s extensions, so about 9 s, hard-capped at 12 s.
+The number is anchored to the physical task rather than chosen: a deliberate
+full rotation of a vial in the hand is 3-5 s, and a wrapped label needs roughly
+1.5 rotations to cover the overlap.
+
+`evidenceLevel == SUFFICIENT` means retrievable fields were read, **not** that
+they retrieved anything. Reading it as "I have an answer" is the bug fixed in
+`da370b6`: a scan that read a catalog number absent from the definitions
+stopped at 4.0 s with `NOT_FOUND` while the rest of the label was still hidden
+around the curve of the vial. A deadline stop now requires CERTAIN or
+CONFIDENT.
+
 ## Design decisions worth keeping
 
 **Region of interest is the biggest single saving.** OCR cost scales with pixel
@@ -254,6 +302,31 @@ fix small API details on the first build in Xcode, and treat every number in
   are drawn from a small number of true positives.
 - Extraction is still imperfect: truncated clones (`145-20` for `145-2C11`),
   truncated lots (`B227`), and five videos yielding no text.
+- **Harvest mode does not exist.** On `NOT_FOUND` the engine keeps turning but
+  is still trying to identify, not to collect fields for a new record. See
+  *Two goals, opposite stopping rules*.
+- **Partial catalog fragments are discarded.** `minLength[CATALOG] = 5` rejects
+  a truncated read as an artefact, so a BioLegend label showing `Cat: 9108`
+  before the digits rotate away contributes nothing. `partialCatalog` already
+  does keep-at-low-weight for Leinco's `[A-Z][0-9]{2}` shape; bare-numeric
+  catalog numbers have no equivalent.
+- **Frame throughput, not sampling policy, is the live bottleneck.** A measured
+  scan on a Pixel 5a took 8 frames in 11.84 s (0.68 fps) and ran OCR on 7 of
+  them, so the sharpness gate was skipping nothing. Of a 2229 ms `ingest`, only
+  311 ms was sharpness plus barcode plus OCR; the remaining ~1.9 s is untimed
+  YUV-to-Bitmap conversion and crop rescale (hypothesis, not yet measured).
+  OCR also runs synchronously on the CameraX analyser thread, so frames
+  arriving during a pass are dropped by backpressure.
+- **Thermal throttling invalidates timing measurements.** A Pixel 5a reaches
+  `Thermal Status: 4` (CRITICAL) after roughly 40 min of camera use and every
+  stage runs 2-3x slower. Check
+  `adb shell dumpsys thermalservice | grep "Thermal Status"` before trusting
+  any number, and confirm a suspected regression against a stage you did not
+  change.
+- **`preferUltraWideZoom` defaults to false**, so scans run on the main lens
+  with its ~10 cm focus floor. Vials held closer than that never resolve, and
+  at 1x a DataMatrix printed on the label is too few pixels to decode even
+  though it would settle identity in one frame.
 - No handling for the hand-applied AbNo dot labels, which would make
   already-received vials trivial to identify.
 - iPhone timing is extrapolated, not measured.

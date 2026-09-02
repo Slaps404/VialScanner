@@ -56,6 +56,13 @@ actually run one of the above.
   lets the CLI exercise the engine without a phone.
 - `Catalog.load` is the only place that knows the CSV format; keep it that way
   if you touch catalog loading.
+- The scanner has **two goals with opposite stopping rules**: identify a known
+  vial (stop as soon as the margin clears) and catalogue a new one (capture
+  every field). Read README "Two goals, opposite stopping rules" and "When a
+  scan stops" before changing pacing, deadlines or field extraction.
+- Before trusting any on-device timing, check
+  `adb shell dumpsys thermalservice | grep "Thermal Status"`. A throttled Pixel
+  runs 2-3x slower and has produced false regressions here.
 - `ScanResult.verdict` is the single gate for what the app auto-commits vs.
   requires confirmation for — see README "Wiring to Airtable" for the exact
   per-verdict rule before changing commit behavior.
