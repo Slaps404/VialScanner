@@ -149,6 +149,11 @@ private let shortCatalogException = try! NSRegularExpression(pattern: #"^[A-Z][0
 /// digits rotate into view.  Keep that fragment at low weight so Evidence can
 /// repair a later near-prefix (`C2355` -> `C2855`); it can never win alone.
 private let partialCatalog = try! NSRegularExpression(pattern: #"^[A-Z][0-9]{2}$"#)
+/// The same truncation on a bare-numeric vendor: BioLegend's `910801` reads as
+/// `Cat: 9108` while the rest is round the curve. Four digits are too
+/// promiscuous a fuzzy-match target to score, so this is carried at zero weight
+/// purely so `EvidenceBuffer.vote` can graft its prefix onto a fuller read.
+private let numericPartialCatalog = try! NSRegularExpression(pattern: #"^[0-9]{4}$"#)
 
 private func matchesWhole(_ re: NSRegularExpression, _ s: String) -> Bool {
     let ns = s as NSString
@@ -372,12 +377,17 @@ func extractFields(from observations: [TextObservation]) -> [LabelField: FieldRe
     let full = NSRange(location: 0, length: ns.length)
 
     // 1. Keyword rules over the whole frame.
+    var numericPartial: String?
     for rule in rules where out[rule.field] == nil {
         guard let m = rule.pattern.firstMatch(in: joined, options: [], range: full),
               m.numberOfRanges > rule.group,
               m.range(at: rule.group).location != NSNotFound else { continue }
         let v = ns.substring(with: m.range(at: rule.group))
             .trimmingCharacters(in: CharacterSet(charactersIn: " .,;:-"))
+        if rule.field == .catalog, numericPartial == nil,
+           !isPlausible(.catalog, v), matchesWhole(numericPartialCatalog, v) {
+            numericPartial = v
+        }
         if !v.isEmpty, isPlausible(rule.field, v) {
             let partial = rule.field == .catalog && matchesWhole(partialCatalog, v.uppercased())
             // Identifiers are voted on as upper-case keys; descriptive fields go
@@ -420,6 +430,12 @@ func extractFields(from observations: [TextObservation]) -> [LabelField: FieldRe
         guard isPlausible(shape.field, v), !looksLikeYearMonth(v), !looksLikeDate(normKey(v))
         else { continue }
         out[shape.field] = FieldReading(value: v, weight: shape.weight)
+    }
+
+    // 4. Last resort only: a fragment must never displace a fuller read that the
+    // same frame produced, and at zero weight it can only ever lend its prefix.
+    if out[.catalog] == nil, let p = numericPartial {
+        out[.catalog] = FieldReading(value: p, weight: 0)
     }
 
     return out

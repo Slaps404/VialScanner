@@ -174,9 +174,12 @@ class EvidenceBuffer {
         // candidate here, and is caught by the null check on lookup. Ties in the
         // length sort are broken alphabetically, which Swift leaves to hash
         // order; that is the port being deterministic where the original is not.
+        // Four bare digits get the same treatment: a vendor that prints no letter
+        // (`910801`) truncates to `9108`, and the fragment is carried at zero
+        // weight, so this is the only way it can affect the outcome.
         val fuzzyKeys = merged.keys.sortedWith(compareBy({ it.length }, { it }))
         for (short in fuzzyKeys) {
-            if (short.length != 3) continue
+            if (short.length != 3 && !(short.length == 4 && short.all { it.isDigit() })) continue
             val s = merged[short] ?: continue
             if (s.score >= 1) continue
             val candidates = fuzzyKeys.filter { long ->

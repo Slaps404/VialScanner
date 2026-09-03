@@ -145,8 +145,12 @@ public struct EvidenceBuffer: Sendable {
         // `C2355` means the complete value is `C2855`; the short observation is
         // trusted only for the prefix it actually saw.  Partial reads carry
         // sub-frame weight and therefore cannot become output on their own.
+        // Four bare digits get the same treatment: a vendor that prints no
+        // letter (`910801`) truncates to `9108`, and the fragment is carried at
+        // zero weight, so this is the only way it can affect the outcome.
         let fuzzyKeys = merged.keys.sorted { $0.count < $1.count }
-        for short in fuzzyKeys where short.count == 3 {
+        for short in fuzzyKeys
+        where short.count == 3 || (short.count == 4 && short.allSatisfy(\.isNumber)) {
             guard let s = merged[short], s.score < 1 else { continue }
             let candidates = fuzzyKeys.filter { long in
                 guard long.count > short.count else { return false }

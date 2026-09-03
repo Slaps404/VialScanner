@@ -186,6 +186,12 @@ private val shortCatalogException = urx("""^[A-Z][0-9]{3}$""")
  *  near-prefix (`C2355` -> `C2855`); it can never win alone. */
 private val partialCatalog = urx("""^[A-Z][0-9]{2}$""")
 
+/** The same truncation on a bare-numeric vendor: BioLegend's `910801` reads as
+ *  `Cat: 9108` while the rest is round the curve. Four digits are too
+ *  promiscuous a fuzzy-match target to score, so this is carried at zero weight
+ *  purely so EvidenceBuffer.vote can graft its prefix onto a fuller read. */
+private val numericPartialCatalog = urx("""^[0-9]{4}$""")
+
 private fun isPlausible(field: LabelField, value: String): Boolean {
     val k = normKey(value)
     // Measure the value as printed, not as normalised. normKey strips the hyphen,
@@ -402,11 +408,17 @@ fun extractFields(observations: List<TextObservation>): Map<LabelField, FieldRea
     val out = LinkedHashMap<LabelField, FieldReading>()
 
     // 1. Keyword rules over the whole frame.
+    var numericPartial: String? = null
     for (rule in rules) {
         if (out.containsKey(rule.field)) continue
         val m = rule.regex.find(joined) ?: continue
         val g = m.groups[rule.group] ?: continue
         val v = g.value.trim(' ', '.', ',', ';', ':', '-')
+        if (rule.field == LabelField.CATALOG && numericPartial == null &&
+            !isPlausible(LabelField.CATALOG, v) && numericPartialCatalog.matches(v)
+        ) {
+            numericPartial = v
+        }
         if (v.isNotEmpty() && isPlausible(rule.field, v)) {
             val partial = rule.field == LabelField.CATALOG && partialCatalog.matches(v.uppercase())
             // Identifiers are voted on as uppercase keys; descriptive fields go
@@ -451,6 +463,12 @@ fun extractFields(observations: List<TextObservation>): Map<LabelField, FieldRea
         val v = shape.normalize(m.value).uppercase()
         if (!isPlausible(shape.field, v) || looksLikeYearMonth(v) || looksLikeDate(normKey(v))) continue
         out[shape.field] = FieldReading(v, shape.weight)
+    }
+
+    // 4. Last resort only: a fragment must never displace a fuller read that the
+    // same frame produced, and at zero weight it can only ever lend its prefix.
+    if (!out.containsKey(LabelField.CATALOG) && numericPartial != null) {
+        out[LabelField.CATALOG] = FieldReading(numericPartial, 0.0)
     }
 
     return out
