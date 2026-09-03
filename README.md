@@ -319,19 +319,35 @@ treat `lotNotOnRecord` as "receive a new lot" rather than "found the vial".
 
 ## Status
 
-`VialCore` and the CLI compile and are validated against all 52 videos; set A
-still resolves 5 of 5 in-database vials with zero false positives after the app
-layer landed.
+Both engine ports build and agree. Last verified on `eee3dd6`:
 
-`App/Models.swift` and `App/Store.swift` — the whole data, import/export and
-audit layer — are **type-checked** against the macOS SDK, since they touch only
-Foundation and `VialCore`.
+| Check | Result |
+| --- | --- |
+| `Videos/pixel` (20 clips) | `hits 3   ambiguous 1   new-vial 16` |
+| `Videos/iCloud Photos` (19 clips) | `hits 3   ambiguous 1   new-vial 15` |
+| Swift/Kotlin tape parity | `39/39` |
+| `:app:compileDebugKotlin` | clean |
+| `App/` under the iOS SDK | clean |
 
-Everything that imports SwiftUI, UIKit or AVFoundation is **parse-checked
-only**. There is no iOS SDK on this machine (Command Line Tools, no Xcode), so
-the UI and camera layers have never been type-checked, built or run. Expect to
-fix small API details on the first build in Xcode, and treat every number in
-*Timing* as still unmeasured on a phone.
+Those four numbers are the regression check for any `VialCore` change, on
+either side. Regenerate the tapes (`--fixtures`) whenever the Swift engine
+changes, or parity is testing a stale recording.
+
+Recently landed, all validated against the table above:
+
+- Android starts on the ultra-wide lens, matching iOS. The main lens cannot
+  focus inside ~10 cm and a vial held at reading distance is inside that.
+- Size, concentration, expiry and storage temperature come off the label and
+  pre-fill the receive form on both platforms.
+- A truncated bare-numeric catalog number (`9108` for `910801`) is carried at
+  zero weight so the vote can graft its prefix onto a fuller read.
+- Tier-3 matching skips the ICU grapheme walk for ASCII keys: 15.21 -> 1.15 ms
+  per resolve on the JVM.
+- OCR confusions are treated as one-to-many, so `91080S` no longer folds
+  confidently onto the wrong definition.
+
+The camera layers have been built and run on a Pixel 5a; iPhone timing is
+still extrapolated rather than measured.
 
 ## Known gaps
 
@@ -349,20 +365,13 @@ fix small API details on the first build in Xcode, and treat every number in
   pre-fill the receive form (expiry and storage land in the extra bag as
   `Expiration Date` and `Storage Temperature`). What is missing is a stopping
   rule that keeps turning until they are all present.
-- **Partial catalog fragments are discarded.** `minLength[CATALOG] = 5` rejects
-  a truncated read as an artefact, so a BioLegend label showing `Cat: 9108`
-  before the digits rotate away contributes nothing. `partialCatalog` already
-  does keep-at-low-weight for Leinco's `[A-Z][0-9]{2}` shape; bare-numeric
-  catalog numbers have no equivalent.
 - **Frame throughput, not sampling policy, is the live bottleneck.** A measured
   scan on a Pixel 5a took 8 frames in 11.84 s (0.68 fps) and ran OCR on 7 of
-  them, so the sharpness gate was skipping nothing. Of a 2229 ms `ingest`, only
-  311 ms was sharpness plus barcode plus OCR; the remaining ~1.9 s is the fuzzy
-  matcher: `Matcher.resolve` tier 3 measures 660-1192 ms per frame on device
-  (1-9 ms on the desktop JVM), and roughly four of nine resolves in a scan
-  recompute a bit-identical answer.
-  OCR also runs synchronously on the CameraX analyser thread, so frames
-  arriving during a pass are dropped by backpressure.
+  them, so the sharpness gate was skipping nothing. Tier-3 matching used to
+  cost 660-1192 ms per frame on device and is now ~13x cheaper on the JVM, but
+  that has not been re-measured on the phone. OCR still runs synchronously on
+  the CameraX analyser thread, so frames arriving during a pass are dropped by
+  backpressure. That is the next thing to fix.
 - **Thermal throttling invalidates timing measurements.** A Pixel 5a reaches
   `Thermal Status: 4` (CRITICAL) after roughly 40 min of camera use and every
   stage runs 2-3x slower. Check
@@ -376,7 +385,6 @@ fix small API details on the first build in Xcode, and treat every number in
 - No handling for the hand-applied AbNo dot labels, which would make
   already-received vials trivial to identify.
 - iPhone timing is extrapolated, not measured.
-- The UI and camera layers have not been compiled — see *Status*.
 - Import expects the Airtable grid-view column names; a filtered or renamed
   export is rejected by name rather than guessed at.
 - Writes are local. Getting them back into Airtable means exporting a CSV and
