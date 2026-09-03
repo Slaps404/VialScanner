@@ -304,7 +304,11 @@ fix small API details on the first build in Xcode, and treat every number in
   truncated lots (`B227`), and five videos yielding no text.
 - **Harvest mode does not exist.** On `NOT_FOUND` the engine keeps turning but
   is still trying to identify, not to collect fields for a new record. See
-  *Two goals, opposite stopping rules*.
+  *Two goals, opposite stopping rules*. The fields themselves are now read:
+  size, concentration, expiry and storage temperature come off the label and
+  pre-fill the receive form (expiry and storage land in the extra bag as
+  `Expiration Date` and `Storage Temperature`). What is missing is a stopping
+  rule that keeps turning until they are all present.
 - **Partial catalog fragments are discarded.** `minLength[CATALOG] = 5` rejects
   a truncated read as an artefact, so a BioLegend label showing `Cat: 9108`
   before the digits rotate away contributes nothing. `partialCatalog` already
@@ -313,8 +317,10 @@ fix small API details on the first build in Xcode, and treat every number in
 - **Frame throughput, not sampling policy, is the live bottleneck.** A measured
   scan on a Pixel 5a took 8 frames in 11.84 s (0.68 fps) and ran OCR on 7 of
   them, so the sharpness gate was skipping nothing. Of a 2229 ms `ingest`, only
-  311 ms was sharpness plus barcode plus OCR; the remaining ~1.9 s is untimed
-  YUV-to-Bitmap conversion and crop rescale (hypothesis, not yet measured).
+  311 ms was sharpness plus barcode plus OCR; the remaining ~1.9 s is the fuzzy
+  matcher: `Matcher.resolve` tier 3 measures 660-1192 ms per frame on device
+  (1-9 ms on the desktop JVM), and roughly four of nine resolves in a scan
+  recompute a bit-identical answer.
   OCR also runs synchronously on the CameraX analyser thread, so frames
   arriving during a pass are dropped by backpressure.
 - **Thermal throttling invalidates timing measurements.** A Pixel 5a reaches
@@ -323,10 +329,10 @@ fix small API details on the first build in Xcode, and treat every number in
   `adb shell dumpsys thermalservice | grep "Thermal Status"` before trusting
   any number, and confirm a suspected regression against a stage you did not
   change.
-- **`preferUltraWideZoom` defaults to false**, so scans run on the main lens
-  with its ~10 cm focus floor. Vials held closer than that never resolve, and
-  at 1x a DataMatrix printed on the label is too few pixels to decode even
-  though it would settle identity in one frame.
+- **A DataMatrix printed on the label still does not decode.** One is visible
+  in a captured BioLegend crop at roughly 40-50 px square; barcode detection
+  ran on five frames of that scan and decoded none. A decode is tier 1 and
+  would settle identity in one frame, bypassing the fuzzy matcher entirely.
 - No handling for the hand-applied AbNo dot labels, which would make
   already-received vials trivial to identify.
 - iPhone timing is extrapolated, not measured.
