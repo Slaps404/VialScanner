@@ -80,17 +80,49 @@ fun ocrFold(s: String): String = buildString {
     }
 }
 
+/// OCR confusions are one-to-many: `s` is genuinely both `5` and `8`, and a
+/// fold to a single glyph can never express that. One bit per shape group, two
+/// characters are confusable when their groups overlap. This sits beside
+/// `ocrFold` rather than replacing it: the fold is still the index key.
+fun confusionGroups(c: Char): Int = when (c) {
+    '0', 'o', 'd' -> 0b0000_0001
+    'q' -> 0b0010_0001
+    '1', 'i', 'l', '7' -> 0b0000_0010
+    '5' -> 0b0000_0100
+    's' -> 0b0000_1100
+    '8' -> 0b0000_1000
+    'b' -> 0b0001_1000
+    '6' -> 0b0001_0000
+    'g' -> 0b0011_0000
+    '9' -> 0b0010_0000
+    '2', 'z' -> 0b0100_0000
+    else -> 0
+}
+
+fun confusable(a: Char, b: Char): Boolean =
+    a != b && (confusionGroups(a) and confusionGroups(b)) != 0
+
+fun confusable(a: String, b: String): Boolean {
+    if (a.length != 1 || b.length != 1) return false
+    return confusable(a[0], b[0])
+}
+
+private fun substitutionCost(a: Char, b: Char): Int =
+    if (a == b) 0 else if (confusable(a, b)) 1 else 2
+
 /// One Levenshtein table, driven by whatever the caller counts as a unit.
-private inline fun levenshtein(n: Int, m: Int, equal: (Int, Int) -> Boolean): Int {
-    var prev = IntArray(m + 1) { it }
+/// `unit` is the insert/delete cost; `cost` scores a substitution on the same
+/// scale, which is what lets `confusionDistance` price a half edit.
+private inline fun levenshtein(n: Int, m: Int, unit: Int, cost: (Int, Int) -> Int): Int {
+    var prev = IntArray(m + 1) { it * unit }
     var cur = IntArray(m + 1)
     for (i in 1..n) {
-        cur[0] = i
+        cur[0] = i * unit
         for (j in 1..m) {
             cur[j] = minOf(
-                prev[j] + 1,
-                cur[j - 1] + 1,
-                prev[j - 1] + if (equal(i - 1, j - 1)) 0 else 1
+                prev[j] + unit,
+                cur[j - 1] + unit,
+                prev[j - 1] + cost(i - 1, j - 1)
             )
         }
         val t = prev; prev = cur; cur = t
@@ -102,10 +134,36 @@ fun editDistance(a: String, b: String): Int {
     if (a == b) return 0
     if (a.isEmpty()) return graphemeCount(b)
     if (b.isEmpty()) return graphemeCount(a)
-    if (isAscii(a) && isAscii(b)) return levenshtein(a.length, b.length) { i, j -> a[i] == b[j] }
+    if (isAscii(a) && isAscii(b)) {
+        return levenshtein(a.length, b.length, 1) { i, j -> if (a[i] == b[j]) 0 else 1 }
+    }
     val ga = graphemes(a)
     val gb = graphemes(b)
-    return levenshtein(ga.size, gb.size) { i, j -> ga[i] == gb[j] }
+    return levenshtein(ga.size, gb.size, 1) { i, j -> if (ga[i] == gb[j]) 0 else 1 }
+}
+
+/// Levenshtein on a doubled cost scale: an ordinary edit costs 2, a
+/// substitution between two confusable glyphs costs 1. Ranking, not gating:
+/// the budget still admits exactly one ordinary edit.
+fun confusionDistance(a: String, b: String): Int {
+    if (a == b) return 0
+    if (a.isEmpty()) return graphemeCount(b) * 2
+    if (b.isEmpty()) return graphemeCount(a) * 2
+    if (isAscii(a) && isAscii(b)) {
+        return levenshtein(a.length, b.length, 2) { i, j -> substitutionCost(a[i], b[j]) }
+    }
+    val ga = graphemes(a)
+    val gb = graphemes(b)
+    return levenshtein(ga.size, gb.size, 2) { i, j ->
+        if (ga[i] == gb[j]) 0 else if (confusable(ga[i], gb[j])) 1 else 2
+    }
+}
+
+/// A letter read where the catalog number carries a digit. Pack size is encoded
+/// in a digit, so a letter in that slot is a misread, not a different product.
+fun letterForDigit(read: String, onFile: String): Boolean {
+    if (read.length != 1 || onFile.length != 1) return false
+    return read[0].isLetter() && isNumeral(onFile[0])
 }
 
 fun similarity(a: String, b: String): Double {

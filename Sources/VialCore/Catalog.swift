@@ -161,6 +161,62 @@ public func ocrFold(_ s: String) -> String {
     return r
 }
 
+/// OCR confusions are one-to-many: `s` is genuinely both `5` and `8`, and a
+/// fold to a single digit can never express that. One bit per glyph-shape
+/// group, two characters are confusable when their groups overlap. See README
+/// "One-to-many OCR confusions" for why this sits beside `ocrFold` rather than
+/// replacing it.
+@inlinable
+public func confusionGroups(_ c: Character) -> UInt8 {
+    switch c {
+    case "0", "o", "d": return 0b0000_0001
+    case "q":           return 0b0010_0001
+    case "1", "i", "l", "7": return 0b0000_0010
+    case "5":           return 0b0000_0100
+    case "s":           return 0b0000_1100
+    case "8":           return 0b0000_1000
+    case "b":           return 0b0001_1000
+    case "6":           return 0b0001_0000
+    case "g":           return 0b0011_0000
+    case "9":           return 0b0010_0000
+    case "2", "z":      return 0b0100_0000
+    default:            return 0
+    }
+}
+
+@inlinable
+public func confusable(_ a: Character, _ b: Character) -> Bool {
+    a != b && (confusionGroups(a) & confusionGroups(b)) != 0
+}
+
+/// Levenshtein on a doubled cost scale: an ordinary edit costs 2, a
+/// substitution between two confusable glyphs costs 1. Ranking, not gating:
+/// the budget still admits exactly one ordinary edit.
+public func confusionDistance(_ a: String, _ b: String) -> Int {
+    if a == b { return 0 }
+    if a.isEmpty { return b.count * 2 }
+    if b.isEmpty { return a.count * 2 }
+    let x = Array(a), y = Array(b)
+    var prev = (0...y.count).map { $0 * 2 }
+    var cur = [Int](repeating: 0, count: y.count + 1)
+    for i in 1...x.count {
+        cur[0] = i * 2
+        for j in 1...y.count {
+            let sub: Int = x[i-1] == y[j-1] ? 0 : (confusable(x[i-1], y[j-1]) ? 1 : 2)
+            cur[j] = min(prev[j] + 2, cur[j - 1] + 2, prev[j - 1] + sub)
+        }
+        swap(&prev, &cur)
+    }
+    return prev[y.count]
+}
+
+/// A letter read where the catalog number carries a digit. Pack size is encoded
+/// in a digit, so a letter in that slot is a misread, not a different product.
+@inlinable
+public func letterForDigit(_ read: Character, _ onFile: Character) -> Bool {
+    read.isLetter && onFile.isNumber
+}
+
 // MARK: - Catalog
 
 public struct Catalog: Sendable {
@@ -201,27 +257,53 @@ public struct Catalog: Sendable {
     public func definitionIndices(forCatalog raw: String) -> [Int] {
         let k = normKey(raw)
         if let hit = byCatalog[k] { return hit }
-        if let hit = byCatalogFolded[ocrFold(raw)] { return hit }
-        return []
+        guard let hit = byCatalogFolded[ocrFold(raw)] else { return [] }
+        // The fold commits `s` to `5`, but the glyph is equally `8`. If some
+        // other definition reads just as plausibly, this is not an exact match:
+        // hand it to the corroborated near-match tier instead of asserting one.
+        let rivals = confusableIndices(k).filter { !hit.contains($0) }
+        return rivals.isEmpty ? hit : []
+    }
+
+    /// Definitions of the same length whose every character is equal to, or
+    /// confusable with, the read. Only walked on a folded hit.
+    private func confusableIndices(_ k: String) -> [Int] {
+        guard k.count >= 4 else { return [] }
+        let read = Array(k)
+        var out: [Int] = []
+        for (i, d) in definitions.enumerated() {
+            let c = Array(normKey(d.catalog))
+            guard c.count == read.count else { continue }
+            var ok = true
+            for j in 0..<c.count where c[j] != read[j] && !confusable(c[j], read[j]) {
+                ok = false; break
+            }
+            if ok { out.append(i) }
+        }
+        return out
     }
 
     /// Catalog numbers within `maxDistance` edits, but only when the answer is
     /// unambiguous. OCR reliably confuses 0/1 in these part numbers (`0103-01`
     /// read as `1103-01`); accepting a unique single-edit neighbour recovers
-    /// those without ever guessing between `0101-01` and `0105-01`.
+    /// those without ever guessing between `0101-01` and `0105-01`. Confusable
+    /// substitutions are half price, so a shape-plausible reading outranks an
+    /// arbitrary one instead of tying with it.
     public func definitionIndex(nearCatalog raw: String, maxDistance: Int = 1) -> Int? {
         let k = normKey(raw)
         guard k.count >= 5 else { return nil }
         var winners: [Int] = []
-        var bestDistance = maxDistance + 1
+        // Doubled scale: one ordinary edit, or two confusable substitutions.
+        let budget = maxDistance * 2
+        var bestDistance = budget + 1
         for (i, d) in definitions.enumerated() {
             let c = normKey(d.catalog)
             guard c.count >= 5, abs(c.count - k.count) <= maxDistance else { continue }
-            let dist = editDistance(c, k)
+            let dist = confusionDistance(c, k)
             if dist < bestDistance { bestDistance = dist; winners = [i] }
             else if dist == bestDistance { winners.append(i) }
         }
-        guard bestDistance <= maxDistance, winners.count == 1 else { return nil }
+        guard bestDistance <= budget, winners.count == 1 else { return nil }
         return winners[0]
     }
 

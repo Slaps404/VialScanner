@@ -180,7 +180,12 @@ public struct Matcher: Sendable {
             // same clone that 406602 sells in bulk — so a difference there is a
             // different product, not a misread. A difference anywhere else is OCR
             // noise (`1103-01` for `0103-01`). Only the latter may name a vial.
-            if differsOnlyInLastCharacter(normKey(cat), normKey(def.catalog)) {
+            // ...unless the trailing character we read is a letter over a digit
+            // on file: pack codes are digits, so that is OCR, not a product.
+            let read = normKey(cat), onFile = normKey(def.catalog)
+            let tailIsMisread = read.count == onFile.count
+                && zip(read, onFile).allSatisfy { $0 == $1 || letterForDigit($0, $1) }
+            if !tailIsMisread, differsOnlyInLastCharacter(read, onFile) {
                 return ScanResult(
                     verdict: .ambiguous, definition: def, vial: nil,
                     otherVials: catalog.inventory(for: def), score: 20, margin: 0,

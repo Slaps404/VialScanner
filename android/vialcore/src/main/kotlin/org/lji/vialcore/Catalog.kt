@@ -135,33 +135,57 @@ class Catalog(
     }
 
     fun definitionIndices(forCatalog: String): List<Int> {
-        byCatalog[normKey(forCatalog)]?.let { return it }
-        byCatalogFolded[ocrFold(forCatalog)]?.let { return it }
-        return emptyList()
+        val k = normKey(forCatalog)
+        byCatalog[k]?.let { return it }
+        val hit = byCatalogFolded[ocrFold(forCatalog)] ?: return emptyList()
+        // The fold commits `s` to `5`, but the glyph is equally `8`. If some
+        // other definition reads just as plausibly, this is not an exact match:
+        // hand it to the corroborated near-match tier instead of asserting one.
+        val rivals = confusableIndices(k).filter { it !in hit }
+        return if (rivals.isEmpty()) hit else emptyList()
+    }
+
+    /** Definitions of the same length whose every character is equal to, or
+     *  confusable with, the read. Only walked on a folded hit. */
+    private fun confusableIndices(k: String): List<Int> {
+        val read = graphemes(k)
+        if (read.size < 4) return emptyList()
+        val out = ArrayList<Int>()
+        definitions.forEachIndexed { i, d ->
+            val c = graphemes(normKey(d.catalog))
+            if (c.size == read.size &&
+                c.indices.all { c[it] == read[it] || confusable(c[it], read[it]) }
+            ) out.add(i)
+        }
+        return out
     }
 
     /**
      * Catalog numbers within [maxDistance] edits, but only when the answer is
      * unambiguous. OCR reliably confuses 0/1 in these part numbers (`0103-01`
      * read as `1103-01`); accepting a unique single-edit neighbour recovers
-     * those without ever guessing between `0101-01` and `0105-01`.
+     * those without ever guessing between `0101-01` and `0105-01`. Confusable
+     * substitutions are half price, so a shape-plausible reading outranks an
+     * arbitrary one instead of tying with it.
      */
     fun definitionIndexNearCatalog(raw: String, maxDistance: Int = 1): Int? {
         val k = normKey(raw)
         if (k.length < 5) return null
         var winners = ArrayList<Int>()
-        var bestDistance = maxDistance + 1
+        // Doubled scale: one ordinary edit, or two confusable substitutions.
+        val budget = maxDistance * 2
+        var bestDistance = budget + 1
         definitions.forEachIndexed { i, d ->
             val c = normKey(d.catalog)
             if (c.length >= 5 && kotlin.math.abs(c.length - k.length) <= maxDistance) {
-                val dist = editDistance(c, k)
+                val dist = confusionDistance(c, k)
                 if (dist < bestDistance) {
                     bestDistance = dist
                     winners = arrayListOf(i)
                 } else if (dist == bestDistance) winners.add(i)
             }
         }
-        if (bestDistance > maxDistance || winners.size != 1) return null
+        if (bestDistance > budget || winners.size != 1) return null
         return winners[0]
     }
 

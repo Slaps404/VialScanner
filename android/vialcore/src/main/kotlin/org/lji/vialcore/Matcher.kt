@@ -194,7 +194,15 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
             // is a different product, not a misread. A difference anywhere else
             // is OCR noise (`1103-01` for `0103-01`). Only the latter may name a
             // vial.
-            if (differsOnlyInLastCharacter(normKey(cat), normKey(def.catalog))) {
+            // ...unless the trailing character we read is a letter over a digit
+            // on file: pack codes are digits, so that is OCR, not a product.
+            val read = normKey(cat)
+            val onFile = normKey(def.catalog)
+            val gRead = graphemes(read)
+            val gFile = graphemes(onFile)
+            val tailIsMisread = gRead.size == gFile.size &&
+                gRead.zip(gFile).all { (r, f) -> r == f || letterForDigit(r, f) }
+            if (!tailIsMisread && differsOnlyInLastCharacter(read, onFile)) {
                 return ScanResult(
                     verdict = Verdict.AMBIGUOUS, definition = def, vial = null,
                     otherVials = catalog.inventoryFor(def), score = 20.0, margin = 0.0,

@@ -211,6 +211,46 @@ character, because vendors encode pack size there. Both gates come from observed
 failures: IMG_4016 (`407101`→`408101`, clone contradicted) and IMG_4015
 (`406601`→`406602`, same clone, different pack size).
 
+**One-to-many OCR confusions.** `ocrFold` maps each confusable letter to one
+digit (`o`->`0`, `s`->`5`, ...). That is a lie about the glyphs: `s` is equally
+`5` and `8`, `1` is equally `l` and `7`, `b` is equally `8` and `6`. The fold
+commits to one reading, so any candidate that needed the other reading is
+unreachable. Real failure: a BioLegend `910801` read as `91080S`, which folds to
+`910805` and can never converge on `910801`.
+
+The fix is not a looser fold. Folding is a hash key, and a hash key has to be
+single-valued or it stops being an index; widening it would loosen tier 1 and
+tier 2, which are the tiers that produce uncorroborated `certain`/`confident`
+verdicts. So the fold stays exactly as it is, and the one-to-many relation lives
+beside it as `confusable(a, b)`: a bitmask per glyph-shape group, true when two
+characters share a group. It is used in three places, all downstream of the
+exact index:
+
+- **Near-catalog distance** (`confusionDistance`) runs Levenshtein on a doubled
+  cost scale: an ordinary edit costs 2, a substitution between confusable glyphs
+  costs 1. The accept budget is still one ordinary edit, so recall is unchanged
+  for arbitrary edits; what changes is ranking. Reading `91080S` against a
+  catalog holding both `910805` and `910801` now prefers `910805` (cost 1) over
+  `910801` (cost 2) instead of tying and refusing, and with only `910801` on
+  file it still reaches it. Two confusable substitutions also fit the budget,
+  which is the recall the fold used to hide.
+- **Fold hits are checked for rivals.** A folded hit is only returned as an
+  exact match if no *other* definition of the same length is also equal-or-
+  confusable to the read. `91080S` against a catalog holding both `910805` and
+  `910808` used to assert `910805` at `confident` with no corroboration; it now
+  declines and falls through to the corroborated tiers.
+- **The pack-size guard reads the trailing character's type.** A trailing
+  difference normally means a different product (`406601` vs `406602`). But pack
+  size is encoded in a *digit*, so a letter read over a digit on file is a
+  misread, not a product, and that case is exempt from the guard. That is what
+  lets `91080S` name `910801`.
+
+Cost is unchanged in the hot path: `ocrFold`, `similarity` and the ~35k
+per-resolve fuzzy comparisons are untouched. The confusion-aware distance
+replaces a plain edit distance that already ran over the same 161 definitions,
+and the rival check only walks the catalog on a folded hit, which is rare.
+Verdicts across all 39 sample clips are byte-identical before and after.
+
 **Inventory joins on the definition link, never on lot.** Lot `F0412-S122Z`
 covers five different vials here. When a lot reads cleanly and matches none of
 the vials on record, the result says so instead of naming one — a wrong vial
