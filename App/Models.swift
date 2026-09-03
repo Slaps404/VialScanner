@@ -341,3 +341,24 @@ struct AppSettings: Codable {
         return c
     }
 }
+
+// Label facts the fixed schema has no column for - size, expiry, storage temp -
+// live in the extra bag, which round-trips through CSV export as its own column.
+let colVolume = "Initial Volume"
+let colExpiry = "Expiration Date"
+let colStorage = "Storage Temperature"
+
+extension Optional where Wrapped == FieldBag {
+    func value(_ name: String) -> String { self?[name] ?? "" }
+
+    mutating func set(_ name: String, _ value: String) {
+        var bag = self ?? FieldBag()
+        let k = normKey(name)
+        if let i = bag.entries.firstIndex(where: { normKey($0.name) == k }) {
+            bag.entries[i] = FieldBag.Entry(name: bag.entries[i].name, value: value)
+        } else if !value.isEmpty {
+            bag.entries.append(FieldBag.Entry(name: name, value: value))
+        }
+        self = bag.isEmpty ? nil : bag
+    }
+}

@@ -90,6 +90,15 @@ fun ReceiveSheet(
             }
             Field("Lot", d.lot, source = sources["Lot"]) { d = d.copy(lot = it) }
             Field("Concentration", d.concentration, source = sources["Concentration"]) { d = d.copy(concentration = it) }
+            Field("Size", d.extra.value(COL_VOLUME), source = sources[COL_VOLUME]) {
+                d = d.copy(extra = d.extra.setting(COL_VOLUME, it))
+            }
+            Field("Expiration date", d.extra.value(COL_EXPIRY), source = sources[COL_EXPIRY]) {
+                d = d.copy(extra = d.extra.setting(COL_EXPIRY, it))
+            }
+            Field("Storage temp", d.extra.value(COL_STORAGE), source = sources[COL_STORAGE]) {
+                d = d.copy(extra = d.extra.setting(COL_STORAGE, it))
+            }
             SuggestField("Location", d.location, store.locations, sources["Location"]) { d = d.copy(location = it) }
             SuggestField("Box", d.box, store.boxes, sources["Box"]) { d = d.copy(box = it) }
             SuggestField("Owner", d.owner, store.owners, sources["Owner"]) { d = d.copy(owner = it) }

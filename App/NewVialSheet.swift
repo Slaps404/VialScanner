@@ -24,6 +24,12 @@ struct NewVialSheet: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
 
+    /// A binding onto one named column of the extra bag, which is where the
+    /// label facts with no fixed schema slot live.
+    private func bagField(_ name: String) -> Binding<String> {
+        Binding(get: { draft.extra.value(name) }, set: { draft.extra.set(name, $0) })
+    }
+
     @State private var pickingDefinition = false
     @State private var creatingDefinition = false
     @State private var newDef = DefRecord(name: "")
@@ -71,6 +77,9 @@ struct NewVialSheet: View {
                             LabeledField(title: "Vial name", text: $draft.vialName)
                             LabeledField(title: "Lot", text: $draft.lot, mono: true, source: sources["Lot"])
                             LabeledField(title: "Concentration", text: $draft.concentration, source: sources["Concentration"])
+                            LabeledField(title: "Size", text: bagField(colVolume), source: sources[colVolume])
+                            LabeledField(title: "Expiration date", text: bagField(colExpiry), source: sources[colExpiry])
+                            LabeledField(title: "Storage temp", text: bagField(colStorage), source: sources[colStorage])
                             LabeledField(title: "Status", text: $draft.status)
                         }
                     }

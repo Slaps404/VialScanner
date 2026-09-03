@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 
 public enum LabelField: String, Sendable, CaseIterable, Codable {
-    case catalog, lot, clone, vendor, concentration, volume, isotype
+    case catalog, lot, clone, vendor, concentration, volume, isotype, expiry, storage
 }
 
 public struct BarcodePayload: Sendable, Equatable {
@@ -85,9 +85,21 @@ private let rules: [Rule] = [
     .init(.clone,   #"CLONE\s*[:#]?\s*\(?\s*([A-Z0-9][A-Z0-9\.\-]{1,12})"#),
     .init(.clone,   #"\(\s*Clone\s+([A-Z0-9][A-Z0-9\.\-]{1,12})\s*\)"#),
     .init(.isotype, #"\b(Ig[GMAE](?:\d[a-c]?)?)\b"#),
-    .init(.concentration, #"(?:C|Conc)\s*[:.]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:mg|ug|µg)\s*/\s*ml"#),
-    .init(.volume,  #"(?:Vol|Size)\s*[:.]?\s*([0-9]+(?:\.[0-9]+)?)\s*m?[lL]"#),
+    // Capture the unit, not just the number: `1` alone fails the plausibility
+    // floor, and a concentration without its unit is not a concentration.
+    .init(.concentration, #"(?:C|Conc)\s*[:.]?\s*([0-9]+(?:\.[0-9]+)?\s*(?:mg|ug|µg|μg)\s*/\s*m?[lL])"#),
+    // Microlitre volumes print the unit as µL, uL or μL; the old rule
+    // only allowed mL, so `Size: 100 µL` fell out entirely.
+    .init(.volume,  #"(?:Vol|Size)\s*[:.]?\s*([0-9]+(?:\.[0-9]+)?\s*(?:m|u|µ|μ)?[lL])"#),
+    // Cataloguing a vial the catalog has never seen needs the whole label, not
+    // just the identifiers - see README "Two goals, opposite stopping rules".
+    .init(.expiry, #"EXP(?:IR(?:Y|ES|ATION))?\.?\s*(?:DATE)?\s*[:.]?\s*([0-9]{4}[-/. ][0-9]{1,2}[-/. ][0-9]{1,2}|[0-9]{1,2}[-/. ][0-9]{1,2}[-/. ][0-9]{2,4}|[0-9]{1,2}[-/ ][0-9]{4}|[0-9]{4}[-/ ][0-9]{1,2})"#),
+    .init(.storage, #"STOR(?:E|AGE)\s*(?:AT)?\s*[:.]?\s*(-?[0-9]{1,3}\s*°?\s*C(?:\s*(?:-|to|TO)\s*-?[0-9]{1,3}\s*°?\s*C)?)"#),
 ]
+
+/// Fields copied onto the record verbatim rather than folded to an upper-case
+/// voting key: they are label facts, not identifiers.
+private let descriptiveFields: Set<LabelField> = [.concentration, .volume, .expiry, .storage]
 
 private let vendorAliases: [(String, String)] = [
     ("southernbiotech", "SouthernBiotech"), ("southernbio", "SouthernBiotech"),
@@ -368,7 +380,10 @@ func extractFields(from observations: [TextObservation]) -> [LabelField: FieldRe
             .trimmingCharacters(in: CharacterSet(charactersIn: " .,;:-"))
         if !v.isEmpty, isPlausible(rule.field, v) {
             let partial = rule.field == .catalog && matchesWhole(partialCatalog, v.uppercased())
-            out[rule.field] = FieldReading(value: v.uppercased(), weight: partial ? 0.4 : 1.0)
+            // Identifiers are voted on as upper-case keys; descriptive fields go
+            // onto the record as printed, where `100 ΜL` would be wrong.
+            let value = descriptiveFields.contains(rule.field) ? v : v.uppercased()
+            out[rule.field] = FieldReading(value: value, weight: partial ? 0.4 : 1.0)
         }
     }
 

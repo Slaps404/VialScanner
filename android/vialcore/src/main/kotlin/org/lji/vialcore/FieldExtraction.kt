@@ -2,7 +2,7 @@ package org.lji.vialcore
 
 import java.util.regex.Pattern
 
-enum class LabelField { CATALOG, LOT, CLONE, VENDOR, CONCENTRATION, VOLUME, ISOTYPE }
+enum class LabelField { CATALOG, LOT, CLONE, VENDOR, CONCENTRATION, VOLUME, ISOTYPE, EXPIRY, STORAGE }
 
 class BarcodePayload(val raw: String, val symbology: String) {
     val catalog: String?
@@ -107,8 +107,34 @@ private val rules: List<Rule> = listOf(
     Rule(LabelField.CLONE, """CLONE\s*[:#]?\s*\(?\s*([A-Z0-9][A-Z0-9.\-]{1,12})"""),
     Rule(LabelField.CLONE, """\(\s*Clone\s+([A-Z0-9][A-Z0-9.\-]{1,12})\s*\)"""),
     Rule(LabelField.ISOTYPE, """\b(Ig[GMAE](?:\d[a-c]?)?)\b"""),
-    Rule(LabelField.CONCENTRATION, """(?:C|Conc)\s*[:.]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:mg|ug|µg)\s*/\s*ml"""),
-    Rule(LabelField.VOLUME, """(?:Vol|Size)\s*[:.]?\s*([0-9]+(?:\.[0-9]+)?)\s*m?[lL]"""),
+    // Capture the unit, not just the number: `1` alone fails the plausibility
+    // floor, and a concentration without its unit is not a concentration.
+    Rule(
+        LabelField.CONCENTRATION,
+        """(?:C|Conc)\s*[:.]?\s*([0-9]+(?:\.[0-9]+)?\s*(?:mg|ug|µg|μg)\s*/\s*m?[lL])"""
+    ),
+    // Microlitre volumes print the unit as `µL`, `uL` or `μL`; the old rule only
+    // allowed `mL`, so `Size: 100 µL` fell out entirely.
+    Rule(LabelField.VOLUME, """(?:Vol|Size)\s*[:.]?\s*([0-9]+(?:\.[0-9]+)?\s*(?:m|u|µ|μ)?[lL])"""),
+    // Cataloguing a vial the catalog has never seen needs the whole label, not
+    // just the identifiers - see README "Two goals, opposite stopping rules".
+    Rule(
+        LabelField.EXPIRY,
+        """EXP(?:IR(?:Y|ES|ATION))?\.?\s*(?:DATE)?\s*[:.]?\s*""" +
+            """([0-9]{4}[-/. ][0-9]{1,2}[-/. ][0-9]{1,2}|[0-9]{1,2}[-/. ][0-9]{1,2}[-/. ][0-9]{2,4}|""" +
+            """[0-9]{1,2}[-/ ][0-9]{4}|[0-9]{4}[-/ ][0-9]{1,2})"""
+    ),
+    Rule(
+        LabelField.STORAGE,
+        """STOR(?:E|AGE)\s*(?:AT)?\s*[:.]?\s*""" +
+            """(-?[0-9]{1,3}\s*°?\s*C(?:\s*(?:-|to|TO)\s*-?[0-9]{1,3}\s*°?\s*C)?)"""
+    ),
+)
+
+/** Fields copied onto the record verbatim rather than folded to an upper-case
+ *  voting key: they are label facts, not identifiers. */
+private val descriptiveFields = setOf(
+    LabelField.CONCENTRATION, LabelField.VOLUME, LabelField.EXPIRY, LabelField.STORAGE,
 )
 
 private val vendorAliases: List<Pair<String, String>> = listOf(
@@ -383,7 +409,10 @@ fun extractFields(observations: List<TextObservation>): Map<LabelField, FieldRea
         val v = g.value.trim(' ', '.', ',', ';', ':', '-')
         if (v.isNotEmpty() && isPlausible(rule.field, v)) {
             val partial = rule.field == LabelField.CATALOG && partialCatalog.matches(v.uppercase())
-            out[rule.field] = FieldReading(v.uppercase(), if (partial) 0.4 else 1.0)
+            // Identifiers are voted on as uppercase keys; descriptive fields go
+            // onto the record as printed, where `100 ΜL` would be wrong.
+            val value = if (rule.field in descriptiveFields) v else v.uppercase()
+            out[rule.field] = FieldReading(value, if (partial) 0.4 else 1.0)
         }
     }
 

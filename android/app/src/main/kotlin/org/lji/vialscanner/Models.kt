@@ -6,6 +6,7 @@ import org.lji.vialcore.FieldBag
 import org.lji.vialcore.FieldEntry
 import org.lji.vialcore.InventoryItem
 import org.lji.vialcore.Verdict
+import org.lji.vialcore.normKey
 import java.util.UUID
 
 // Persistable mirrors of the engine's records.
@@ -25,6 +26,21 @@ data class FieldEntryDTO(val name: String, val value: String)
 
 fun List<FieldEntryDTO>.toBag(): FieldBag = FieldBag(map { FieldEntry(it.name, it.value) })
 fun FieldBag.toDTO(): List<FieldEntryDTO> = entries.map { FieldEntryDTO(it.name, it.value) }
+
+// Label facts the fixed schema has no column for - size, expiry, storage temp -
+// live in the extra bag, which round-trips through CSV export as its own column.
+const val COL_VOLUME = "Initial Volume"
+const val COL_EXPIRY = "Expiration Date"
+const val COL_STORAGE = "Storage Temperature"
+
+fun List<FieldEntryDTO>.value(name: String): String =
+    firstOrNull { normKey(it.name) == normKey(name) }?.value ?: ""
+
+fun List<FieldEntryDTO>.setting(name: String, value: String): List<FieldEntryDTO> {
+    val i = indexOfFirst { normKey(it.name) == normKey(name) }
+    if (i < 0) return if (value.isEmpty()) this else this + FieldEntryDTO(name, value)
+    return toMutableList().also { it[i] = FieldEntryDTO(it[i].name, value) }
+}
 
 @Serializable
 data class DefRecord(

@@ -1005,6 +1005,20 @@ fun buildReceiveDraft(store: AppStore, r: ScanResult): ReceiveDraft {
     val concentration = r.fields[LabelField.CONCENTRATION] ?: ""
     if (concentration.isNotEmpty()) sources["Concentration"] = FieldSource.OCR
 
+    // Size, expiry and storage are not identifiers, so they never help decide
+    // *which* vial this is - but on the new-vial path they are half the record.
+    var extra = emptyList<FieldEntryDTO>()
+    for ((field, col) in listOf(
+        LabelField.VOLUME to COL_VOLUME,
+        LabelField.EXPIRY to COL_EXPIRY,
+        LabelField.STORAGE to COL_STORAGE,
+    )) {
+        val v = r.fields[field] ?: continue
+        if (v.isEmpty()) continue
+        extra = extra.setting(col, v)
+        sources[col] = FieldSource.OCR
+    }
+
     // Remembered rather than blank - see `rememberReceivingDefaults` at the
     // call site for how these get updated after a save.
     val owner = store.settings.defaultOwner

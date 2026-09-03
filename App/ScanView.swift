@@ -666,6 +666,17 @@ struct ScanView: View {
         draft.concentration = result.fields[.concentration] ?? ""
         if !draft.concentration.isEmpty { sources["Concentration"] = .ocr }
 
+        // Size, expiry and storage are not identifiers, so they never help
+        // decide *which* vial this is - but on the new-vial path they are half
+        // the record.
+        for (field, col) in [(LabelField.volume, colVolume),
+                             (LabelField.expiry, colExpiry),
+                             (LabelField.storage, colStorage)] {
+            guard let v = result.fields[field], !v.isEmpty else { continue }
+            draft.extra.set(col, v)
+            sources[col] = .ocr
+        }
+
         // Remembered rather than blank: the freezer drawer someone is standing
         // in front of is almost always the one they used last time, and a box
         // being worked through beats either.
