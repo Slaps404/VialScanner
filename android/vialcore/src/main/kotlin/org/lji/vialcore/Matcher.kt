@@ -221,6 +221,7 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
         val stable = ev.stableTokens(2)
         val tokens = if (stable.size >= 8) stable else ev.allTokens
         val folded = tokens.mapTo(HashSet()) { ocrFold(it) }
+        val hay = fuzzyHay(tokens)
 
         val ranked = ArrayList<DefinitionMatch>()
         for (def in catalog.definitions) {
@@ -246,7 +247,7 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
                 } else if (ocrFold(value) in folded) {
                     score += w * 0.85; reasons.add("$field~=$value")
                 } else {
-                    val near = bestFuzzy(k, tokens)
+                    val near = bestFuzzy(k, hay)
                     if (near != null && near.second >= 0.82) {
                         score += w * 0.65; reasons.add("$field~${near.first}")
                     }
@@ -300,6 +301,7 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
     private fun corroborates(def: AntibodyDefinition, ev: EvidenceBuffer): Boolean {
         val tokens = ev.allTokens
         val folded = tokens.mapTo(HashSet()) { ocrFold(it) }
+        val hay = fuzzyHay(tokens)
         for (value in listOf(def.clone, def.target)) {
             val k = normKey(value)
             if (k.length < 3) continue
@@ -307,7 +309,7 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
             // OCR truncates at the label curve, so accept a token that is a
             // prefix of the real value (`RMG` for clone `RMG1-1`).
             if (tokens.any { it.length >= 3 && k.startsWith(it) }) return true
-            val near = bestFuzzy(k, tokens)
+            val near = bestFuzzy(k, hay)
             if (near != null && near.second >= 0.85) return true
         }
         return false

@@ -202,6 +202,7 @@ public struct Matcher: Sendable {
         let stable = ev.stableTokens(minFrames: 2)
         let tokens = stable.count >= 8 ? stable : ev.allTokens
         let folded = Set(tokens.map(ocrFold))
+        let hay = fuzzyHay(tokens)
 
         var ranked: [DefinitionMatch] = []
         for def in catalog.definitions {
@@ -211,19 +212,9 @@ public struct Matcher: Sendable {
                 guard let w = config.fieldWeights[field] else { return }
                 let k = normKey(value)
                 guard k.count >= 2 else { return }
-                // Field extraction canonicalises as it reads: a label printed
-                // `Cell Signaling Technology` yields vendor `CST`, the spelling
-                // the catalog uses. That resolution has to be honoured here or
-                // it is thrown away, because the token bag below holds the words
-                // the label actually printed. A vendor that never prints its own
-                // abbreviation would otherwise score zero on every definition it
-                // sells, which is the whole reason the alias table exists.
-                if let read = fields[field], normKey(read) == k {
-                    score += w; reasons.append("\(field)=\(value)"); return
-                }
                 if tokens.contains(k) { score += w; reasons.append("\(field)=\(value)") }
                 else if folded.contains(ocrFold(value)) { score += w * 0.85; reasons.append("\(field)≈\(value)") }
-                else if let near = bestFuzzy(k, tokens), near.1 >= 0.82 {
+                else if let near = bestFuzzy(k, hay), near.1 >= 0.82 {
                     score += w * 0.65; reasons.append("\(field)~\(near.0)")
                 }
             }
@@ -278,6 +269,7 @@ public struct Matcher: Sendable {
     private func corroborates(_ def: AntibodyDefinition, _ ev: EvidenceBuffer) -> Bool {
         let tokens = ev.allTokens
         let folded = Set(tokens.map(ocrFold))
+        let hay = fuzzyHay(tokens)
         for value in [def.clone, def.target] {
             let k = normKey(value)
             guard k.count >= 3 else { continue }
@@ -285,7 +277,7 @@ public struct Matcher: Sendable {
             // OCR truncates at the label curve, so accept a token that is a
             // prefix of the real value (`RMG` for clone `RMG1-1`).
             if tokens.contains(where: { $0.count >= 3 && k.hasPrefix($0) }) { return true }
-            if let near = bestFuzzy(k, tokens), near.1 >= 0.85 { return true }
+            if let near = bestFuzzy(k, hay), near.1 >= 0.85 { return true }
         }
         return false
     }
@@ -320,27 +312,50 @@ public struct Matcher: Sendable {
 
 // MARK: - String similarity
 
+/// An all-ASCII string has one grapheme per byte, so walking grapheme clusters
+/// is pure overhead for it. The keys the matcher compares are normKey/ocrFold
+/// output, i.e. ASCII in practice, and that walk was nearly the whole cost of
+/// the tens of thousands of comparisons tier 3 does per frame.
+@inlinable
+func isASCII(_ s: String) -> Bool {
+    for u in s.utf8 where u >= 0x80 { return false }
+    return true
+}
+
+@inlinable
+func graphemeCount(_ s: String) -> Int { isASCII(s) ? s.utf8.count : s.count }
+
 func similarity(_ a: String, _ b: String) -> Double {
     if a == b { return 1 }
     if a.isEmpty || b.isEmpty { return 0 }
-    return 1.0 - Double(editDistance(a, b)) / Double(max(a.count, b.count))
+    return 1.0 - Double(editDistance(a, b)) / Double(max(graphemeCount(a), graphemeCount(b)))
+}
+
+/// One Levenshtein table, driven by whatever the caller counts as a unit.
+@inline(__always)
+private func levenshtein(_ n: Int, _ m: Int, _ equal: (Int, Int) -> Bool) -> Int {
+    var prev = Array(0...m)
+    var cur = [Int](repeating: 0, count: m + 1)
+    for i in 1...n {
+        cur[0] = i
+        for j in 1...m {
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (equal(i - 1, j - 1) ? 0 : 1))
+        }
+        swap(&prev, &cur)
+    }
+    return prev[m]
 }
 
 func editDistance(_ a: String, _ b: String) -> Int {
     if a == b { return 0 }
-    if a.isEmpty { return b.count }
-    if b.isEmpty { return a.count }
-    let x = Array(a), y = Array(b)
-    var prev = Array(0...y.count)
-    var cur = [Int](repeating: 0, count: y.count + 1)
-    for i in 1...x.count {
-        cur[0] = i
-        for j in 1...y.count {
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (x[i-1] == y[j-1] ? 0 : 1))
-        }
-        swap(&prev, &cur)
+    if a.isEmpty { return graphemeCount(b) }
+    if b.isEmpty { return graphemeCount(a) }
+    if isASCII(a) && isASCII(b) {
+        let x = Array(a.utf8), y = Array(b.utf8)
+        return levenshtein(x.count, y.count) { x[$0] == y[$1] }
     }
-    return prev[y.count]
+    let x = Array(a), y = Array(b)
+    return levenshtein(x.count, y.count) { x[$0] == y[$1] }
 }
 
 /// True when two strings are identical except for their final character, or when
@@ -357,12 +372,17 @@ func differsOnlyInLastCharacter(_ a: String, _ b: String) -> Bool {
     return false
 }
 
-func bestFuzzy(_ needle: String, _ hay: Set<String>) -> (String, Double)? {
+/// The token bag in the order `bestFuzzy` will scan it. Prepared once per
+/// resolve: the matcher asks the same question hundreds of times per frame.
+func fuzzyHay(_ tokens: Set<String>) -> [String] { Array(tokens) }
+
+func bestFuzzy(_ needle: String, _ hay: [String]) -> (String, Double)? {
     var best: (String, Double)?
+    let needleLen = graphemeCount(needle)
     for t in hay {
         // Length gate keeps this cheap: edit distance cannot beat the threshold
         // if the lengths are already too far apart.
-        guard abs(t.count - needle.count) <= 3 else { continue }
+        guard abs(graphemeCount(t) - needleLen) <= 3 else { continue }
         let s = similarity(needle, t)
         if s > (best?.1 ?? 0) { best = (t, s) }
     }
