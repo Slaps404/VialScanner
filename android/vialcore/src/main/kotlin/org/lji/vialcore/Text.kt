@@ -69,6 +69,60 @@ fun ocrFold(s: String): String = buildString {
     }
 }
 
+/// OCR confusions are one-to-many: `s` is genuinely both `5` and `8`, and a
+/// fold to a single digit can never express that. One bit per glyph-shape
+/// group, two characters are confusable when their groups overlap. See README
+/// "One-to-many OCR confusions" for why this sits beside `ocrFold` rather than
+/// replacing it.
+fun confusionGroups(c: Char): Int = when (c) {
+    '0', 'o', 'd' -> 0b0000_0001
+    'q' -> 0b0010_0001
+    '1', 'i', 'l', '7' -> 0b0000_0010
+    '5' -> 0b0000_0100
+    's' -> 0b0000_1100
+    '8' -> 0b0000_1000
+    'b' -> 0b0001_1000
+    '6' -> 0b0001_0000
+    'g' -> 0b0011_0000
+    '9' -> 0b0010_0000
+    '2', 'z' -> 0b0100_0000
+    else -> 0
+}
+
+fun confusable(a: String, b: String): Boolean {
+    if (a == b || a.length != 1 || b.length != 1) return false
+    return (confusionGroups(a[0]) and confusionGroups(b[0])) != 0
+}
+
+/// Levenshtein on a doubled cost scale: an ordinary edit costs 2, a
+/// substitution between two confusable glyphs costs 1. Ranking, not gating:
+/// the budget still admits exactly one ordinary edit.
+fun confusionDistance(a: String, b: String): Int {
+    if (a == b) return 0
+    if (a.isEmpty()) return graphemes(b).size * 2
+    if (b.isEmpty()) return graphemes(a).size * 2
+    val ga = graphemes(a)
+    val gb = graphemes(b)
+    var prev = IntArray(gb.size + 1) { it * 2 }
+    var cur = IntArray(gb.size + 1)
+    for (i in 1..ga.size) {
+        cur[0] = i * 2
+        for (j in 1..gb.size) {
+            val sub = if (ga[i - 1] == gb[j - 1]) 0 else if (confusable(ga[i - 1], gb[j - 1])) 1 else 2
+            cur[j] = minOf(prev[j] + 2, cur[j - 1] + 2, prev[j - 1] + sub)
+        }
+        val t = prev; prev = cur; cur = t
+    }
+    return prev[gb.size]
+}
+
+/// A letter read where the catalog number carries a digit. Pack size is encoded
+/// in a digit, so a letter in that slot is a misread, not a different product.
+fun letterForDigit(read: String, onFile: String): Boolean {
+    if (read.length != 1 || onFile.length != 1) return false
+    return read[0].isLetter() && isNumeral(onFile[0])
+}
+
 fun editDistance(a: String, b: String): Int {
     if (a == b) return 0
     if (a.isEmpty()) return graphemes(b).size
