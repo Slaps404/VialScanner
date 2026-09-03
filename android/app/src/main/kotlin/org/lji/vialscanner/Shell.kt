@@ -302,9 +302,7 @@ fun GlassCircleIcon(
     icon: ImageVector,
     size: androidx.compose.ui.unit.Dp = 44.dp,
     active: Boolean = false,
-    /// Fill when on. Defaults to white, which is the neutral "this is engaged"
-    /// treatment; the clip toggle overrides it to red so recording does not
-    /// look like every other engaged control.
+    /// Fill when on. The clip toggle overrides this to red.
     activeColor: Color = Color.White,
     onClick: () -> Unit,
 ) {
@@ -322,8 +320,7 @@ fun GlassCircleIcon(
     ) {
         Icon(
             icon, null,
-            // Picked off the fill rather than hard-coded, so a dark
-            // `activeColor` (the red clip toggle) still reads.
+            // Off the fill, so a dark `activeColor` still reads.
             tint = if (active && activeColor.luminance() > 0.5f) Color.Black else Color.White,
             modifier = Modifier.size(size * 0.40f),
         )

@@ -94,14 +94,18 @@ fun ScanScreen(
     var rejecting by remember { mutableStateOf(false) }
     var flash by remember { mutableStateOf<String?>(null) }
 
-    // Per-scan clip toggle. Seeded from "always keep" once, like Swift's
-    // `.onAppear { keepClip = store.settings.alwaysKeepClips }`, so the toggle
-    // starts wherever the setting says but is still a live per-scan decision.
+    // Sole decider of whether the next scan records; the settings only seed it,
+    // so the on-screen button always has the last word. See README "Clip
+    // recording".
     var keepClip by remember { mutableStateOf(store.settings.alwaysKeepClips) }
-    // Recomputed fresh on every recomposition, so a setting flipped mid-run
-    // (hands-free turned on, "always keep" turned on) applies to the next scan
-    // rather than waiting for the app to restart.
-    val recordThisScan = keepClip || store.settings.alwaysKeepClips || store.settings.handsFree
+    LaunchedEffect(store.settings.alwaysKeepClips) {
+        if (store.settings.alwaysKeepClips) keepClip = true
+    }
+    // Hands-free commits with nobody looking, so the clip is the only record.
+    LaunchedEffect(store.settings.handsFree) {
+        if (store.settings.handsFree) keepClip = true
+    }
+    val recordThisScan = keepClip
 
     val state = controller.state
     val idle = !controller.running
@@ -149,7 +153,7 @@ fun ScanScreen(
                 controller.rescan(recordThisScan)
             }
             else -> {
-                dismiss(store, controller, r)
+                dismiss(store, controller, r, keepClip)
                 controller.rescan(recordThisScan)
             }
         }
@@ -223,7 +227,7 @@ fun ScanScreen(
                     },
                     onReceive = { receiving = buildReceiveDraft(store, state.result) },
                     onRescan = {
-                        dismiss(store, controller, state.result)
+                        dismiss(store, controller, state.result, keepClip)
                         controller.rescan(recordThisScan)
                     },
                     onReject = { rejecting = true },
@@ -273,7 +277,7 @@ fun ScanScreen(
             onSaved = { saved ->
                 val s = controller.state
                 if (s is ScanState.Finished) {
-                    val clip = attachClip(store, controller, s.result, keepClip || store.settings.alwaysKeepClips)
+                    val clip = attachClip(store, controller, s.result, keepClip)
                     store.log(record(s.result, ScanOutcome.RECEIVED, clip).copy(abNo = saved.abNo))
                 }
                 receiving = null
@@ -586,10 +590,9 @@ private fun IdleControls(
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            CaptionedToggle(
+            GlassCircleIcon(
                 if (store.settings.handsFree) Icons.Filled.GraphicEq else Icons.Filled.TouchApp,
-                caption = if (store.settings.handsFree) "Hands-free" else "Manual",
-                active = store.settings.handsFree,
+                size = 50.dp, active = store.settings.handsFree,
             ) {
                 Haptics.tap()
                 val turningOn = !store.settings.handsFree
@@ -608,79 +611,25 @@ private fun IdleControls(
             Shutter(onScan)
             Spacer(Modifier.width(14.dp))
 
-            // "Always keep" and hands-free both force recording regardless of
-            // this toggle (see `recordThisScan` in `ScanScreen`), so the icon
-            // reflects the effective state even when the operator cannot turn
-            // it off - same as Swift always showing "video.fill" in that case.
-            val forcedOn = store.settings.alwaysKeepClips || store.settings.handsFree
-            val effectivelyOn = keepClip || forcedOn
-            CaptionedToggle(
-                if (effectivelyOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                caption = if (forcedOn) "Clip always" else if (keepClip) "Clip on" else "Clip off",
-                active = effectivelyOn,
-                // Red rather than the default white: this is the one control on
-                // the bar that decides whether video is written, and "on" for it
-                // should not look like "on" for hands-free next to it.
-                activeColor = Ink.bad,
+            // Red, not the default white: recording should not look like every
+            // other engaged control on the bar.
+            GlassCircleIcon(
+                if (keepClip) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+                size = 50.dp, active = keepClip, activeColor = Ink.bad,
             ) {
-                // Nothing to toggle if binding VideoCapture failed on this
-                // device - the icon still reflects the (unreachable) setting
-                // rather than lying about it.
-                if (controller.clipRecordingUnsupported) return@CaptionedToggle
-                Haptics.tap()
-                // Parity with Swift's `flash(...)` on this toggle, which Android
-                // was missing: the caption says the new state, the tip says what
-                // it means. Say nothing misleading when a setting is holding it
-                // on and the tap cannot turn it off.
-                if (forcedOn) {
-                    tip(
-                        if (store.settings.handsFree) "Hands-free always keeps a clip"
-                        else "\"Always keep clips\" is on in Settings"
-                    )
-                } else {
-                    onToggleKeepClip()
-                    tip(
-                        if (!keepClip) "Keeping a clip of the next scan"
-                        else "Not keeping clips"
-                    )
+                // VideoCapture failed to bind on this device.
+                if (controller.clipRecordingUnsupported) {
+                    tip("This phone cannot record clips")
+                    return@GlassCircleIcon
                 }
+                Haptics.tap()
+                onToggleKeepClip()
+                tip(
+                    if (!keepClip) "Clip on - recording a video of the next scan"
+                    else "Clip off - no video kept"
+                )
             }
         }
-    }
-}
-
-/**
- * A round toggle with its state written underneath.
- *
- * The two controls flanking the shutter used to say nothing: on was a white
- * circle, off was a grey one, and which was which is only obvious if you
- * already know. The caption is the state, not the control's name, so there is
- * nothing to infer - and it is what makes "am I recording?" answerable without
- * tapping to find out.
- */
-@Composable
-private fun CaptionedToggle(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    caption: String,
-    active: Boolean,
-    activeColor: Color = Color.White,
-    onClick: () -> Unit,
-) {
-    // Fixed width so the row does not shift when the caption changes length.
-    // Wide enough for the longest caption either toggle uses.
-    Column(
-        Modifier.width(92.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        GlassCircleIcon(icon, size = 50.dp, active = active, activeColor = activeColor, onClick = onClick)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            caption,
-            color = if (active) activeColor else Color.White.copy(alpha = 0.65f),
-            fontSize = Type.caption,
-            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-            maxLines = 1,
-        )
     }
 }
 
@@ -953,7 +902,7 @@ private fun clipMetadata(store: AppStore, controller: ScanController, r: ScanRes
  */
 private fun confirm(store: AppStore, controller: ScanController, r: ScanResult, keepClip: Boolean): String {
     val abNo = r.vial?.abNo ?: run { controller.discardPendingClip(); return "Nothing to confirm" }
-    val clip = attachClip(store, controller, r, keepClip || store.settings.alwaysKeepClips)
+    val clip = attachClip(store, controller, r, keepClip)
     val open = store.openAudit
     val logged = store.log(record(r, ScanOutcome.CONFIRMED, clip).copy(auditID = open?.id))
     store.markConfirmed(abNo, logged.id)
@@ -991,13 +940,18 @@ private fun park(store: AppStore, controller: ScanController, r: ScanResult) {
 /**
  * The operator (or a hands-free pass that met no bar) walked away from a
  * result without confirming or parking it. Swift's `reject()` always throws
- * the clip away; "always keep clips" overrides that here, on purpose - a NEW
- * VIAL or an uncorroborated read nobody acted on is exactly the failure a
- * labelling run needs the video for. A blank read carries no verdict worth
- * keeping a row for, so it is skipped either way, same as Swift.
+ * the clip away; the clip toggle overrides that here, on purpose - a NEW VIAL
+ * or an uncorroborated read nobody acted on is exactly the failure a labelling
+ * run needs the video for. A blank read carries no verdict worth keeping a row
+ * for, so it is skipped either way, same as Swift.
  */
-private fun dismiss(store: AppStore, controller: ScanController, r: ScanResult) {
-    if (store.settings.alwaysKeepClips && !r.readNothing) {
+private fun dismiss(
+    store: AppStore,
+    controller: ScanController,
+    r: ScanResult,
+    keepClip: Boolean,
+) {
+    if (keepClip && !r.readNothing) {
         val clip = attachClip(store, controller, r, wantsKeep = true)
         if (clip != null) store.log(record(r, ScanOutcome.REJECTED, clip))
     } else {
@@ -1071,6 +1025,7 @@ fun buildReceiveDraft(store: AppStore, r: ScanResult): ReceiveDraft {
         location = location,
         box = box,
         owner = owner,
+        extra = extra,
     )
     return ReceiveDraft(item, prefillDef, sources)
 }

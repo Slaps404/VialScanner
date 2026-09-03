@@ -290,8 +290,9 @@ data class AppSettings(
     /** Steer focus at the label text instead of at the middle of the frame. */
     var autoTextFocus: Boolean = true,
     /** Start on the ultra-wide lens, which focuses far closer than the main one.
-     *  Off by default: it is the softer sensor, and it only wins up close. */
-    var preferUltraWideZoom: Boolean = false,
+     *  On by default to match iOS: the main lens cannot focus inside ~10 cm, and
+     *  a vial held at reading distance is inside that. */
+    var preferUltraWideZoom: Boolean = true,
     var defaultOwner: String = "",
     var defaultLocation: String = "",
     var defaultBox: String = "",
