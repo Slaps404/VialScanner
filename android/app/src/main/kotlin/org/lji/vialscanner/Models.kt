@@ -170,6 +170,9 @@ data class ScanRecord(
     var framesUsed: Int = 0,
     var lotNotOnRecord: Boolean = false,
     var note: String = "",
+    /** Free text the operator typed on the result sheet for a kept clip. Kept
+     *  apart from [note], which a review resolution overwrites. */
+    var clipNote: String? = null,
     var auditID: String? = null,
     var resolvedAt: Long? = null,
     /** Filename under the Clips directory, or null when this scan's video was
@@ -371,6 +374,15 @@ data class AppSettings(
  */
 @Serializable
 data class ClipMetadata(
+    /** The mp4 this file sits beside, so a clip copied off the device without
+     *  its sidecar (or the other way round) is still identifiable. */
+    val clip: String,
+    /** ISO8601 UTC. */
+    val recordedAt: String,
+    /** Verbatim operator note, tokens and all. */
+    val note: String = "",
+    /** Whatever `parseClipNote` read off the front of [note]. */
+    val expect: ClipExpectationDTO? = null,
     val verdict: String,
     val definitionName: String? = null,
     val abNo: String? = null,
@@ -382,6 +394,16 @@ data class ClipMetadata(
     val barcode: BarcodeMetadata? = null,
     val capture: CaptureMetadata,
     val device: DeviceMetadata,
+)
+
+/** Serializable mirror of `VialCore.ClipExpectation`: the engine's parser stays
+ *  dependency-free, so the wire shape lives here. */
+@Serializable
+data class ClipExpectationDTO(
+    val catalog: String? = null,
+    val lot: String? = null,
+    val clone: String? = null,
+    val verdict: String? = null,
 )
 
 @Serializable

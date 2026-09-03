@@ -48,11 +48,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
 import androidx.compose.ui.unit.IntOffset
+import java.time.Instant
+import java.time.temporal.ChronoUnit
 import org.lji.vialcore.LabelField
 import org.lji.vialcore.NormRect
 import org.lji.vialcore.ScanResult
 import org.lji.vialcore.ScanState
 import org.lji.vialcore.Verdict
+import org.lji.vialcore.parseClipNote
 
 /**
  * The screen the app exists for. Same layout rules as `App/ScanView.swift`,
@@ -106,6 +109,9 @@ fun ScanScreen(
         if (store.settings.handsFree) keepClip = true
     }
     val recordThisScan = keepClip
+    // Typed on the result card, written into the clip's sidecar. Cleared on
+    // every commit so it never rides along to the next vial.
+    var clipNote by remember { mutableStateOf("") }
 
     val state = controller.state
     val idle = !controller.running
@@ -144,16 +150,19 @@ fun ScanScreen(
         if (controller.state !== s) return@LaunchedEffect
         when {
             meetsBar(r.verdict, store.settings.autoCommit) && r.vial != null -> {
-                flash = confirm(store, controller, r, keepClip)
+                flash = confirm(store, controller, r, keepClip, clipNote)
+                clipNote = ""
                 controller.rescan(recordThisScan)
             }
             store.settings.handsFreeParksUncertain && !r.readNothing -> {
-                park(store, controller, r)
+                park(store, controller, r, clipNote)
+                clipNote = ""
                 flash = "Saved for review"
                 controller.rescan(recordThisScan)
             }
             else -> {
-                dismiss(store, controller, r, keepClip)
+                dismiss(store, controller, r, keepClip, clipNote)
+                clipNote = ""
                 controller.rescan(recordThisScan)
             }
         }
@@ -216,18 +225,24 @@ fun ScanScreen(
                 state is ScanState.Finished -> ResultPanel(
                     r = state.result,
                     store = store,
+                    keepClip = keepClip,
+                    clipNote = clipNote,
+                    onClipNoteChange = { clipNote = it },
                     onConfirm = {
-                        flash = confirm(store, controller, state.result, keepClip)
+                        flash = confirm(store, controller, state.result, keepClip, clipNote)
+                        clipNote = ""
                         controller.rescan(recordThisScan)
                     },
                     onPark = {
-                        park(store, controller, state.result)
+                        park(store, controller, state.result, clipNote)
+                        clipNote = ""
                         flash = "Saved for review"
                         controller.rescan(recordThisScan)
                     },
                     onReceive = { receiving = buildReceiveDraft(store, state.result) },
                     onRescan = {
-                        dismiss(store, controller, state.result, keepClip)
+                        dismiss(store, controller, state.result, keepClip, clipNote)
+                        clipNote = ""
                         controller.rescan(recordThisScan)
                     },
                     onReject = { rejecting = true },
@@ -277,9 +292,10 @@ fun ScanScreen(
             onSaved = { saved ->
                 val s = controller.state
                 if (s is ScanState.Finished) {
-                    val clip = attachClip(store, controller, s.result, keepClip)
-                    store.log(record(s.result, ScanOutcome.RECEIVED, clip).copy(abNo = saved.abNo))
+                    val clip = attachClip(store, controller, s.result, keepClip, clipNote)
+                    store.log(record(s.result, ScanOutcome.RECEIVED, clip, clipNote).copy(abNo = saved.abNo))
                 }
+                clipNote = ""
                 receiving = null
                 flash = "Received AbNo ${saved.abNo}"
                 Haptics.commit()
@@ -296,12 +312,14 @@ fun ScanScreen(
                 rankedCandidates = s.result.otherVials,
                 onDismiss = { rejecting = false },
                 onPickItem = { item ->
-                    reject(store, controller, s.result, recordThisScan, trueAbNo = item.abNo)
+                    reject(store, controller, s.result, recordThisScan, trueAbNo = item.abNo, note = clipNote)
+                    clipNote = ""
                     rejecting = false
                     controller.rescan(recordThisScan)
                 },
                 onPickDefinition = { def ->
-                    reject(store, controller, s.result, recordThisScan, trueCatalog = def.catalog)
+                    reject(store, controller, s.result, recordThisScan, trueCatalog = def.catalog, note = clipNote)
+                    clipNote = ""
                     rejecting = false
                     controller.rescan(recordThisScan)
                 },
@@ -310,7 +328,8 @@ fun ScanScreen(
                     receiving = buildReceiveDraft(store, s.result)
                 },
                 onDontKnow = {
-                    reject(store, controller, s.result, recordThisScan)
+                    reject(store, controller, s.result, recordThisScan, note = clipNote)
+                    clipNote = ""
                     rejecting = false
                     controller.rescan(recordThisScan)
                 },
@@ -737,6 +756,9 @@ private fun DarkCapsuleText(text: String) {
 private fun ResultPanel(
     r: ScanResult,
     store: AppStore,
+    keepClip: Boolean,
+    clipNote: String,
+    onClipNoteChange: (String) -> Unit,
     onConfirm: () -> Unit,
     onPark: () -> Unit,
     onReceive: () -> Unit,
@@ -798,6 +820,17 @@ private fun ResultPanel(
             Mono(r.reasons.joinToString(", "))
             store.activeSessionBox?.let { Mono("will file to box $it", Ink.accent) }
 
+            // Only when the video is being kept: the note is metadata for the
+            // clip, and with no clip there is nothing for it to sit beside.
+            if (keepClip) {
+                Field(
+                    label = "Clip note",
+                    value = clipNote,
+                    placeholder = "cat=910801 lot=B411234 expect=newVial, plus notes",
+                    onChange = onClipNoteChange,
+                )
+            }
+
             Spacer(Modifier.height(16.dp))
             if (vial != null) {
                 PrimaryButton("Confirm this vial is here", onClick = onConfirm)
@@ -826,7 +859,7 @@ private fun meetsBar(v: Verdict, bar: Verdict): Boolean {
     return (rank[v] ?: 0) >= (rank[bar] ?: 2)
 }
 
-fun record(r: ScanResult, outcome: ScanOutcome, clipFile: String? = null): ScanRecord = ScanRecord(
+fun record(r: ScanResult, outcome: ScanOutcome, clipFile: String? = null, clipNote: String? = null): ScanRecord = ScanRecord(
     verdict = r.verdict.name,
     outcome = outcome,
     abNo = r.vial?.abNo,
@@ -842,6 +875,7 @@ fun record(r: ScanResult, outcome: ScanOutcome, clipFile: String? = null): ScanR
     framesUsed = r.framesUsed,
     lotNotOnRecord = r.lotNotOnRecord,
     clipFile = clipFile,
+    clipNote = clipNote?.takeIf { it.isNotBlank() },
 )
 
 // ---- Clips ------------------------------------------------------------
@@ -852,10 +886,17 @@ fun record(r: ScanResult, outcome: ScanOutcome, clipFile: String? = null): ScanR
  * toggle and "always keep clips" - callers pass the already-decided value so
  * this function only has to act on it.
  */
-private fun attachClip(store: AppStore, controller: ScanController, r: ScanResult, wantsKeep: Boolean): String? {
+private fun attachClip(
+    store: AppStore,
+    controller: ScanController,
+    r: ScanResult,
+    wantsKeep: Boolean,
+    note: String = "",
+): String? {
     val temp = if (wantsKeep) controller.consumePendingClip() else null
     val name = store.keepClip(temp)
-    if (name == null) controller.discardPendingClip() else store.writeClipMetadata(name, clipMetadata(store, controller, r))
+    if (name == null) controller.discardPendingClip()
+    else store.writeClipMetadata(name, clipMetadata(store, controller, r, name, note))
     return name
 }
 
@@ -864,10 +905,21 @@ private fun attachClip(store: AppStore, controller: ScanController, r: ScanResul
  * what the engine concluded, what fed that, and the conditions the frames were
  * shot under. See `ClipMetadata`'s doc for what is deliberately left out.
  */
-private fun clipMetadata(store: AppStore, controller: ScanController, r: ScanResult): ClipMetadata {
+private fun clipMetadata(
+    store: AppStore,
+    controller: ScanController,
+    r: ScanResult,
+    clipName: String,
+    note: String,
+): ClipMetadata {
     val bc = r.barcode
     val s = store.settings
+    val expect = parseClipNote(note)
     return ClipMetadata(
+        clip = clipName,
+        recordedAt = Instant.now().truncatedTo(ChronoUnit.SECONDS).toString(),
+        note = note,
+        expect = expect?.let { ClipExpectationDTO(it.catalog, it.lot, it.clone, it.verdict) },
         verdict = r.verdict.name,
         definitionName = r.definition?.name,
         abNo = r.vial?.abNo,
@@ -900,11 +952,17 @@ private fun clipMetadata(store: AppStore, controller: ScanController, r: ScanRes
  * the box when the session box actually filed it somewhere new - a stamp nobody
  * can see is a stamp nobody can correct.
  */
-private fun confirm(store: AppStore, controller: ScanController, r: ScanResult, keepClip: Boolean): String {
+private fun confirm(
+    store: AppStore,
+    controller: ScanController,
+    r: ScanResult,
+    keepClip: Boolean,
+    note: String = "",
+): String {
     val abNo = r.vial?.abNo ?: run { controller.discardPendingClip(); return "Nothing to confirm" }
-    val clip = attachClip(store, controller, r, keepClip)
+    val clip = attachClip(store, controller, r, keepClip, note)
     val open = store.openAudit
-    val logged = store.log(record(r, ScanOutcome.CONFIRMED, clip).copy(auditID = open?.id))
+    val logged = store.log(record(r, ScanOutcome.CONFIRMED, clip, note).copy(auditID = open?.id))
     store.markConfirmed(abNo, logged.id)
     val filed = store.stampSessionBox(abNo)
     if (open != null) store.recordFound(abNo, open.id, method = "scan", scanID = logged.id)
@@ -918,9 +976,9 @@ private fun confirm(store: AppStore, controller: ScanController, r: ScanResult, 
 /** A parked scan always keeps its video, whatever the toggle says - that is
  *  the point of parking: someone else has to be able to see what the camera
  *  saw. Mirrors Swift's `park()`. */
-private fun park(store: AppStore, controller: ScanController, r: ScanResult) {
-    val clip = attachClip(store, controller, r, wantsKeep = true)
-    store.log(record(r, ScanOutcome.REVIEW, clip))
+private fun park(store: AppStore, controller: ScanController, r: ScanResult, note: String = "") {
+    val clip = attachClip(store, controller, r, wantsKeep = true, note = note)
+    store.log(record(r, ScanOutcome.REVIEW, clip, note))
     Haptics.commit()
     // A scan the audit could not name is still evidence that something was in
     // the drawer, so record it as an unexpected item rather than dropping it.
@@ -950,10 +1008,11 @@ private fun dismiss(
     controller: ScanController,
     r: ScanResult,
     keepClip: Boolean,
+    note: String = "",
 ) {
     if (keepClip && !r.readNothing) {
-        val clip = attachClip(store, controller, r, wantsKeep = true)
-        if (clip != null) store.log(record(r, ScanOutcome.REJECTED, clip))
+        val clip = attachClip(store, controller, r, wantsKeep = true, note = note)
+        if (clip != null) store.log(record(r, ScanOutcome.REJECTED, clip, note))
     } else {
         controller.discardPendingClip()
     }
@@ -976,14 +1035,15 @@ private fun reject(
     wantsClip: Boolean,
     trueAbNo: String? = null,
     trueCatalog: String? = null,
+    note: String = "",
 ) {
     if (r.readNothing) {
         controller.discardPendingClip()
         return
     }
-    val clip = attachClip(store, controller, r, wantsClip)
+    val clip = attachClip(store, controller, r, wantsClip, note)
     store.log(
-        record(r, ScanOutcome.REJECTED, clip)
+        record(r, ScanOutcome.REJECTED, clip, note)
             .copy(trueAbNo = trueAbNo, trueCatalog = trueCatalog),
     )
     Haptics.commit()

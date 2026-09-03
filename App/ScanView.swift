@@ -23,6 +23,9 @@ struct ScanView: View {
     @State private var newVialPrefillDef: DefRecord? = nil
     @State private var newVialSources: [String: FieldSource] = [:]
     @State private var keepClip = false
+    // Typed on the result card, written into the kept clip's sidecar. Cleared
+    // on every commit so it never rides along to the next vial.
+    @State private var clipNote = ""
     @State private var countdown: Double = 0
     @State private var countdownTotal: Double = 1
     @State private var autoAction: AutoAction? = nil
@@ -447,6 +450,7 @@ struct ScanView: View {
                 result: result,
                 clipURL: camera.pendingClip,
                 keepClip: $keepClip,
+                clipNote: $clipNote,
                 countdown: countdown,
                 countdownTotal: countdownTotal,
                 autoLabel: autoLabel,
@@ -571,6 +575,7 @@ struct ScanView: View {
             framesUsed: result.framesUsed,
             lotNotOnRecord: result.lotNotOnRecord,
             clipFile: clip,
+            clipNote: clip == nil ? nil : clipNote.isEmpty ? nil : clipNote,
             auditID: store.openAudit?.id
         )
     }
@@ -583,7 +588,8 @@ struct ScanView: View {
         let clip = (keepClip || store.settings.alwaysKeepClips)
             ? store.keepClip(at: camera.consumePendingClip())
             : nil
-        if clip == nil { camera.discardPendingClip() }
+        if let clip { store.writeClipSidecar(for: clip, note: clipNote) }
+        else { camera.discardPendingClip() }
 
         var built = makeRecord(result, outcome: .confirmed, clip: clip)
         if let overrideAbNo {
@@ -633,6 +639,7 @@ struct ScanView: View {
         // That is the entire point of parking: someone else has to be able to
         // see what the camera saw.
         let clip = store.keepClip(at: camera.consumePendingClip())
+        if let clip { store.writeClipSidecar(for: clip, note: clipNote) }
         store.log(makeRecord(result, outcome: .review, clip: clip))
         Haptics.commit()
         store.banner = AppStore.Banner(
@@ -740,7 +747,8 @@ struct ScanView: View {
         let clip = (keepClip || store.settings.alwaysKeepClips)
             ? store.keepClip(at: camera.consumePendingClip())
             : nil
-        if clip == nil { camera.discardPendingClip() }
+        if let clip { store.writeClipSidecar(for: clip, note: clipNote) }
+        else { camera.discardPendingClip() }
 
         var record = makeRecord(result, outcome: .received, clip: clip)
         record.abNo = item.abNo
@@ -766,6 +774,7 @@ struct ScanView: View {
     /// After anything is committed: keep the line moving in hands-free, go back
     /// to a live idle viewfinder otherwise.
     private func afterCommit() {
+        clipNote = ""
         camera.cancelScan()
         if store.settings.handsFree {
             autoAction = .rescan

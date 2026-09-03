@@ -273,6 +273,10 @@ final class AppStore: ObservableObject {
 
     static func clipURL(_ name: String) -> URL { clipsDir.appendingPathComponent(name) }
 
+    static func clipSidecarURL(_ name: String) -> URL {
+        clipsDir.appendingPathComponent((name as NSString).deletingPathExtension + ".json")
+    }
+
     /// Move a just-recorded temp file into permanent storage. Returns the stored
     /// filename, or nil when there was nothing to keep.
     func keepClip(at temp: URL?) -> String? {
@@ -288,8 +292,28 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// Writes the sidecar for a kept clip. Best-effort: a scan's video is worth
+    /// keeping even if, somehow, its note cannot be. Mirrors Kotlin's
+    /// `AppStore.writeClipMetadata`.
+    func writeClipSidecar(for clipName: String, note: String) {
+        let sidecar = ClipSidecar(clip: clipName,
+                                  recordedAt: Self.iso8601UTC.string(from: Date()),
+                                  note: note,
+                                  expect: parseClipNote(note).map(ClipExpectationDTO.init))
+        let e = JSONEncoder()
+        guard let data = try? e.encode(sidecar) else { return }
+        try? data.write(to: Self.clipSidecarURL(clipName), options: .atomic)
+    }
+
+    private static let iso8601UTC: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        return f
+    }()
+
     func deleteClip(named name: String) {
         try? FileManager.default.removeItem(at: Self.clipURL(name))
+        try? FileManager.default.removeItem(at: Self.clipSidecarURL(name))
     }
 
     var clipBytes: Int64 {

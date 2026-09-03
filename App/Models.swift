@@ -160,6 +160,9 @@ struct ScanRecord: Codable, Identifiable, Hashable {
     /// Filename inside the clips directory, when the operator kept the video.
     var clipFile: String? = nil
     var note: String = ""
+    /// Free text the operator typed on the result sheet for a kept clip. Kept
+    /// apart from `note`, which a review resolution overwrites.
+    var clipNote: String? = nil
     var auditID: UUID? = nil
     var resolvedAt: Date? = nil
     /// Set only on a rejected scan where the operator identified the real
@@ -360,5 +363,32 @@ extension Optional where Wrapped == FieldBag {
             bag.entries.append(FieldBag.Entry(name: name, value: value))
         }
         self = bag.isEmpty ? nil : bag
+    }
+}
+
+// MARK: - Clip sidecar
+
+/// Written next to a kept clip as `<clipname>.json` so the video still means
+/// something after it is copied off the phone.
+struct ClipSidecar: Codable {
+    let clip: String
+    /// ISO8601 UTC.
+    let recordedAt: String
+    /// Verbatim operator note, tokens and all.
+    let note: String
+    /// Whatever `parseClipNote` read off the front of `note`.
+    let expect: ClipExpectationDTO?
+}
+
+/// Codable mirror of `VialCore.ClipExpectation`: the engine's parser stays
+/// dependency-free, so the wire shape lives here.
+struct ClipExpectationDTO: Codable {
+    var catalog: String?
+    var lot: String?
+    var clone: String?
+    var verdict: String?
+
+    init(_ e: ClipExpectation) {
+        catalog = e.catalog; lot = e.lot; clone = e.clone; verdict = e.verdict
     }
 }

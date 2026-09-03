@@ -239,7 +239,7 @@ public final class ScanEngine {
                 case .certain:
                     settled = r
                     return .finished(r)
-                case .notFound where coverageSatisfied:
+                case .notFound where harvestSatisfied(elapsed: elapsed):
                     // The code named a product that is not on file. That verdict
                     // is definitive, but the label still has to be read: those
                     // fields are what pre-fills the receive form, and stopping
@@ -313,35 +313,39 @@ public final class ScanEngine {
                coverageSatisfied {
                 let r = matcher.resolve(evidence, standard: .corroborated)
                 lastStandard = .corroborated
-                if r.verdict == .certain || r.verdict == .confident, confirmed(r) {
+                if catalogued(r), confirmed(r) {
                     settled = r
                     return .finished(r)
                 }
             }
         }
 
-        if elapsed >= deadline {
+        if elapsed >= deadline || elapsed >= config.hardScanCeiling {
             let r = matcher.resolve(evidence)
             lastStandard = .best
             // Only stop on the deadline if there is something to stop *with*.
             // `.sufficient` means retrievable fields were read, not that they
             // retrieved anything, so a non-answer still spends an extension:
             // the rest of the label is hidden around the curve of the vial.
-            let answered = r.evidenceLevel == .sufficient
-                && (r.verdict == .certain || r.verdict == .confident)
+            let answered = catalogued(r)
             // Extend while the label is still yielding, not a fixed number of
             // times. Counting attempts stops a vial mid-rotation; saturation
             // asks the question that matters, whether more waiting can buy more
             // evidence. See README "Two goals, opposite stopping rules".
-            let exhausted = evidence.framesSinceNewToken >= config.saturationFrames
+            let exhausted = harvestSatisfied(elapsed: elapsed)
             if answered
                 || exhausted
-                || elapsed + config.graceExtension > config.hardScanCeiling {
+                || elapsed >= config.hardScanCeiling {
+                settled = r
+                return .finished(r)
+            }
+            let extension = min(config.graceExtension, config.hardScanCeiling - elapsed)
+            guard extension > 0 else {
                 settled = r
                 return .finished(r)
             }
             extensionsGranted += 1
-            deadline = elapsed + config.graceExtension
+            deadline = elapsed + extension
             ocrBudget += config.ocrFramesPerExtension
         }
 
@@ -366,6 +370,23 @@ public final class ScanEngine {
     private var coverageSatisfied: Bool {
         evidence.distinctViews >= config.minDistinctViews
             || evidence.framesSinceNewToken >= config.saturationFrames
+    }
+
+    /// A new or unresolved vial gets a real rotation window before repeated
+    /// reads of one face can end the scan. New tokens reset saturation, so a
+    /// continuing rotation naturally earns another extension at the deadline.
+    private func harvestSatisfied(elapsed: Double) -> Bool {
+        elapsed >= max(0, config.minHarvestDuration)
+            && evidence.framesSinceNewToken >= config.saturationFrames
+    }
+
+    /// Only a catalogued identity may take the fast path. A known definition
+    /// with a lot that is absent from inventory still needs the full harvest so
+    /// the receive form gets every field the label exposes.
+    private func catalogued(_ result: ScanResult) -> Bool {
+        result.evidenceLevel == .sufficient
+            && (result.verdict == .certain || result.verdict == .confident)
+            && !result.lotNotOnRecord
     }
 
     /// A verdict is only allowed to end the scan once the same verdict has come

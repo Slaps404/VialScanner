@@ -277,6 +277,7 @@ struct LabeledField: View {
     let title: String
     @Binding var text: String
     var mono: Bool = false
+    var placeholder: String = ""
     /// Where this value came from, if it was prefilled rather than typed.
     /// A barcode read is ground truth; an OCR read or a remembered default
     /// is a guess worth a second look. Once the operator edits the field the
@@ -294,7 +295,7 @@ struct LabeledField: View {
                         .help(source.label)
                 }
             }
-            TextField("", text: $text)
+            TextField(placeholder, text: $text)
                 .font(mono ? Theme.mono : Theme.body)
                 .autocorrectionDisabled()
                 .padding(.horizontal, 12).frame(height: 44)

@@ -11,6 +11,9 @@ struct ResultCard: View {
     let result: ScanResult
     let clipURL: URL?
     @Binding var keepClip: Bool
+    /// Free text for the kept clip's sidecar. Only reachable while the clip is
+    /// being kept - with no clip there is nothing for it to sit beside.
+    @Binding var clipNote: String
     let countdown: Double
     let countdownTotal: Double
     let autoLabel: String?
@@ -365,6 +368,7 @@ struct ResultCard: View {
             }
 
             clipRow
+            clipNoteField
         }
     }
 
@@ -383,6 +387,14 @@ struct ResultCard: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.fill))
+    }
+
+    @ViewBuilder
+    private var clipNoteField: some View {
+        if clipURL != nil, keepClip {
+            LabeledField(title: "Clip note", text: $clipNote,
+                         placeholder: "cat=910801 lot=B411234 expect=newVial, plus notes")
+        }
     }
 
     // MARK: Actions

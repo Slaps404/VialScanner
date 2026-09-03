@@ -281,6 +281,7 @@ fun Field(
     value: String,
     modifier: Modifier = Modifier,
     source: FieldSource? = null,
+    placeholder: String = "",
     onChange: (String) -> Unit,
 ) {
     Column(modifier.padding(vertical = 6.dp)) {
@@ -303,7 +304,7 @@ fun Field(
                 .background(Ink.fill)
                 .padding(horizontal = 14.dp),
         ) {
-            BasicField("", value, Modifier.weight(1f).padding(vertical = 12.dp), onChange)
+            BasicField(placeholder, value, Modifier.weight(1f).padding(vertical = 12.dp), onChange)
         }
     }
 }
