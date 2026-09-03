@@ -334,7 +334,7 @@ struct AppSettings: Codable {
         c.minDistinctViews = max(1, minDistinctViews)
         // Grace is measured from the give-up time, so raising that knob does not
         // quietly eat the extra seconds a scan gets when it has read nothing.
-        c.hardScanCeiling = max(12.0, maxScanSeconds + 2 * c.graceExtension)
+        c.hardScanCeiling = max(20.0, maxScanSeconds + 2 * c.graceExtension)
         let inset = min(max(roiInset, 0), 0.4)
         c.regionOfInterest = CGRect(x: inset, y: inset * 1.3,
                                     width: 1 - inset * 2, height: 1 - inset * 2.6)

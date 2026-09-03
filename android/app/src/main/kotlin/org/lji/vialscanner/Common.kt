@@ -90,10 +90,17 @@ fun SettingRow(
 }
 
 @Composable
-fun ToggleRow(title: String, detail: String? = null, value: Boolean, onChange: (Boolean) -> Unit) {
+fun ToggleRow(
+    title: String,
+    detail: String? = null,
+    value: Boolean,
+    enabled: Boolean = true,
+    onChange: (Boolean) -> Unit,
+) {
     SettingRow(title, detail) {
         Switch(
             checked = value,
+            enabled = enabled,
             onCheckedChange = onChange,
             colors = SwitchDefaults.colors(
                 checkedTrackColor = Ink.accent,

@@ -103,11 +103,10 @@ public struct EngineConfig: Sendable {
 
     /// Extra stream time granted when the deadline arrives on thin evidence.
     public var graceExtension: Double = 2.5
-    /// How many times the deadline may be pushed back.
-    public var maxExtensions = 2
     /// Absolute ceiling. Past this the scan ends whatever it has, because a
-    /// scanner that never stops is worse than one that admits it failed.
-    public var hardScanCeiling: Double = 12.0
+    /// scanner that never stops is worse than one that admits it failed. Long
+    /// enough for a full unhurried rotation of the vial.
+    public var hardScanCeiling: Double = 20.0
     /// OCR passes added to the budget with each extension. Without this the
     /// extra seconds would be spent on frames the budget no longer allows.
     public var ocrFramesPerExtension = 12
@@ -330,8 +329,13 @@ public final class ScanEngine {
             // the rest of the label is hidden around the curve of the vial.
             let answered = r.evidenceLevel == .sufficient
                 && (r.verdict == .certain || r.verdict == .confident)
+            // Extend while the label is still yielding, not a fixed number of
+            // times. Counting attempts stops a vial mid-rotation; saturation
+            // asks the question that matters, whether more waiting can buy more
+            // evidence. See README "Two goals, opposite stopping rules".
+            let exhausted = evidence.framesSinceNewToken >= config.saturationFrames
             if answered
-                || extensionsGranted >= config.maxExtensions
+                || exhausted
                 || elapsed + config.graceExtension > config.hardScanCeiling {
                 settled = r
                 return .finished(r)

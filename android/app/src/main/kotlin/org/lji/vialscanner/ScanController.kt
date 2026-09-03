@@ -2,6 +2,9 @@ package org.lji.vialscanner
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CameraMetadata
 import android.graphics.Matrix
 import android.os.Handler
 import android.os.Looper
@@ -50,6 +53,7 @@ class ScanController(private val store: AppStore, context: Context) {
 
     private val analysisExecutor = Executors.newSingleThreadExecutor()
     private val clipRecorder = ClipRecorder(context)
+    private val appContext = context.applicationContext
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     /**
      * The same seven symbologies Swift asks Vision for
@@ -104,6 +108,10 @@ class ScanController(private val store: AppStore, context: Context) {
         private set
 
     var zoomRatio by mutableStateOf(1f)
+
+    /** False when the widest back lens is fixed focus, which disables the
+     *  ultra-wide preference no matter what the setting says. */
+    var ultraWideFocuses by mutableStateOf(true)
         private set
 
     /** The lens stops worth offering, e.g. 0.5x / 1x / 2x. One entry means the
@@ -354,11 +362,12 @@ class ScanController(private val store: AppStore, context: Context) {
                 if (maxZoom >= 2f) add(2f)
             }
 
-            // Ultra-wide focuses far closer than the main lens - around 2 cm
-            // against 10 - which is the whole reason to prefer it here. It is a
-            // preference and not the default because it is also the softer
-            // sensor, and a vial held at arm's length reads better at 1x.
-            val want = if (store.settings.preferUltraWideZoom) minZoom else 1f
+            // Only worth it if that lens can actually focus. iPhone ultra-wides
+            // autofocus, which is why iOS can prefer 0.5x unconditionally; the
+            // Pixel 5a's is fixed at infinity and reports no AF mode at all, so
+            // preferring it there makes every label permanently soft.
+            ultraWideFocuses = ultraWideCanFocus(appContext)
+            val want = if (store.settings.preferUltraWideZoom && ultraWideFocuses) minZoom else 1f
             setZoom(want.coerceIn(minZoom, maxZoom))
 
             // Aim focus and exposure at the middle of the frame straight away.
@@ -576,3 +585,33 @@ class ScanController(private val store: AppStore, context: Context) {
         scanner.close()
     }
 }
+
+/**
+ * Can the widest back lens focus?
+ *
+ * CameraX reports one zoom range for the logical camera and says nothing about
+ * which physical sensor serves a given ratio, so this asks Camera2 directly:
+ * of the back camera's physical lenses, take the shortest focal length and ask
+ * whether it offers any autofocus mode. A `minimumFocusDistance` of 0 means
+ * fixed at infinity. Defaults to true when the query fails, since the setting
+ * is still the operator's to make.
+ */
+fun ultraWideCanFocus(context: Context): Boolean = runCatching {
+    val mgr = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    val back = mgr.cameraIdList.firstOrNull {
+        mgr.getCameraCharacteristics(it)[CameraCharacteristics.LENS_FACING] ==
+            CameraCharacteristics.LENS_FACING_BACK
+    } ?: return@runCatching true
+
+    val chars = mgr.getCameraCharacteristics(back)
+    val ids = chars.physicalCameraIds.ifEmpty { setOf(back) }
+    val widest = ids.minByOrNull { id ->
+        mgr.getCameraCharacteristics(id)[CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS]
+            ?.minOrNull() ?: Float.MAX_VALUE
+    } ?: return@runCatching true
+
+    val w = mgr.getCameraCharacteristics(widest)
+    val modes = w[CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES] ?: intArrayOf()
+    val minDist = w[CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE] ?: 0f
+    modes.any { it != CameraMetadata.CONTROL_AF_MODE_OFF } && minDist > 0f
+}.getOrDefault(true)

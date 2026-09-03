@@ -419,6 +419,7 @@ private fun ExportRow(label: String, onClick: () -> Unit) {
 @Composable
 fun SettingsScreen(store: AppStore, openMenu: () -> Unit) {
     val s = store.settings
+    val ctx = androidx.compose.ui.platform.LocalContext.current
 
     Screen("Settings", openMenu) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
@@ -511,10 +512,13 @@ fun SettingsScreen(store: AppStore, openMenu: () -> Unit) {
                     "Steers the lens at the label text instead of the middle of the frame.",
                     s.autoTextFocus,
                 ) { store.updateSettings { c -> c.copy(autoTextFocus = it) } }
+                val wideFocuses = remember(ctx) { ultraWideCanFocus(ctx) }
                 ToggleRow(
                     "Prefer 0.5x ultra-wide",
-                    "The wide lens focuses about 2 cm away against roughly 10 for the main one.",
-                    s.preferUltraWideZoom,
+                    if (wideFocuses) "Starts on the wide lens, which focuses closer than the main one."
+                    else "Unavailable: this phone's wide lens is fixed focus and cannot read a label.",
+                    s.preferUltraWideZoom && wideFocuses,
+                    enabled = wideFocuses,
                 ) { store.updateSettings { c -> c.copy(preferUltraWideZoom = it) } }
                 ToggleRow(
                     "Haptics",

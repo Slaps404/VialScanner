@@ -346,7 +346,7 @@ data class AppSettings(
         c.minDistinctViews = maxOf(1, minDistinctViews)
         // Grace is measured from the give-up time, so raising that knob does not
         // quietly eat the extra seconds a scan gets when it has read nothing.
-        c.hardScanCeiling = maxOf(12.0, maxScanSeconds + 2 * c.graceExtension)
+        c.hardScanCeiling = maxOf(20.0, maxScanSeconds + 2 * c.graceExtension)
         val inset = roiInset.coerceIn(0.0, 0.4)
         c.regionOfInterest = org.lji.vialcore.NormRect(inset, inset * 1.3, 1 - inset * 2, 1 - inset * 2.6)
         return c

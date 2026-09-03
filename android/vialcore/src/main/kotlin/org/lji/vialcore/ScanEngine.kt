@@ -107,10 +107,9 @@ class EngineConfig {
     // the time back rather than spend it on a verdict.
 
     var graceExtension: Double = 2.5
-    var maxExtensions = 2
     /** Absolute ceiling: a scanner that never stops is worse than one that
-     *  admits it failed. */
-    var hardScanCeiling: Double = 12.0
+     *  admits it failed. Long enough for a full unhurried rotation. */
+    var hardScanCeiling: Double = 20.0
     /** OCR passes added with each extension, so the extra seconds are usable. */
     var ocrFramesPerExtension = 12
     var match = MatchConfig()
@@ -279,8 +278,13 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
             // the rest of the label is hidden around the curve of the vial.
             val answered = r.evidenceLevel == EvidenceLevel.SUFFICIENT &&
                 (r.verdict == Verdict.CERTAIN || r.verdict == Verdict.CONFIDENT)
+            // Extend while the label is still yielding, not a fixed number of
+            // times. Counting attempts stops a vial mid-rotation; saturation
+            // asks whether more waiting can buy more evidence. See README
+            // "Two goals, opposite stopping rules".
+            val exhausted = evidence.framesSinceNewToken >= config.saturationFrames
             if (answered ||
-                extensionsGranted >= config.maxExtensions ||
+                exhausted ||
                 elapsed + config.graceExtension > config.hardScanCeiling
             ) {
                 settled = r
