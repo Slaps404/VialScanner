@@ -226,7 +226,10 @@ struct VialDetailSheet: View {
                             }
                         }
                         Pill(title: "Save changes", icon: "checkmark", kind: .solid) {
-                            store.updateVial(draft)
+                            var saved = draft
+                            saved.syncReceivingNotes()
+                            store.updateVial(saved)
+                            draft = saved
                             editing = false
                             Haptics.commit()
                         }

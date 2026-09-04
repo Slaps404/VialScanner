@@ -350,15 +350,22 @@ struct AppSettings: Codable {
 let colVolume = "Initial Volume"
 let colExpiry = "Expiration Date"
 let colStorage = "Storage Temperature"
-/// Printed on vials as "Order No." and carried by no Airtable column, so it
-/// lives in the bag like expiry and storage temperature do.
-let colOrderNo = "Order No"
+let colReceivingNotes = "Receiving Notes"
 
 /// One editable column in a form: what to call it on screen, and the printed
-/// header it reads and writes.
+/// header(s) it reads and writes. A few Airtable exports contain both a source
+/// field and a copy/formula of that field. The first non-empty candidate wins,
+/// so editing a value updates the column that actually carried the import.
 struct FormColumn: Hashable {
     let title: String
-    let column: String
+    let columns: [String]
+
+    init(title: String, column: String, aliases: [String] = []) {
+        self.title = title
+        self.columns = [column] + aliases
+    }
+
+    var column: String { columns[0] }
 }
 
 // Columns the base carries that the fixed schema has no named slot for. Listing
@@ -369,7 +376,10 @@ struct FormColumn: Hashable {
 // show in the read-only carried-fields list.
 let vialFormColumns: [FormColumn] = [
     FormColumn(title: "Category", column: "Ab Category"),
-    FormColumn(title: "Conjugate", column: "Conjugate"),
+    // The bundled export has an empty `Conjugate` field beside populated
+    // `Conjugate copy` values. Preserve whichever source column is carrying
+    // the value instead of creating a second, misleading edit.
+    FormColumn(title: "Conjugate", column: "Conjugate", aliases: ["Conjugate copy"]),
     FormColumn(title: "Amount", column: "Amount"),
     FormColumn(title: "Formulation", column: "Formulation"),
     FormColumn(title: "Current volume", column: "Current Volume"),
@@ -378,7 +388,6 @@ let vialFormColumns: [FormColumn] = [
     FormColumn(title: "Total conjugated", column: "Total Volume Conjugated"),
     FormColumn(title: "Parent vial", column: "Parent Vial"),
     FormColumn(title: "Projects", column: "Projects"),
-    FormColumn(title: "Order no", column: colOrderNo),
 ]
 
 let definitionFormColumns: [FormColumn] = [
@@ -391,17 +400,47 @@ let definitionFormColumns: [FormColumn] = [
 ]
 
 extension Optional where Wrapped == FieldBag {
-    func value(_ name: String) -> String { self?[name] ?? "" }
+    func value(_ name: String) -> String { value([name]) }
+
+    func value(_ names: [String]) -> String {
+        for name in names {
+            if let value = self?[name], !value.isEmpty { return value }
+        }
+        // Keep an imported empty field visible to the binding. This matters
+        // when the row has the header but no value yet.
+        for name in names {
+            if let value = self?[name] { return value }
+        }
+        return ""
+    }
 
     mutating func set(_ name: String, _ value: String) {
+        set([name], value)
+    }
+
+    mutating func set(_ names: [String], _ value: String) {
+        guard !names.isEmpty else { return }
         var bag = self ?? FieldBag()
-        let k = normKey(name)
-        if let i = bag.entries.firstIndex(where: { normKey($0.name) == k }) {
+        let keys = names.map(normKey)
+        let matching = bag.entries.indices.filter { keys.contains(normKey(bag.entries[$0].name)) }
+        // Prefer the non-empty alias. In the shipped inventory this selects
+        // `Conjugate copy` over the empty `Conjugate` column.
+        let target = matching.first(where: { !bag.entries[$0].value.isEmpty }) ?? matching.first
+        if let i = target {
             bag.entries[i] = FieldBag.Entry(name: bag.entries[i].name, value: value)
         } else if !value.isEmpty {
-            bag.entries.append(FieldBag.Entry(name: name, value: value))
+            bag.entries.append(FieldBag.Entry(name: names[0], value: value))
         }
         self = bag.isEmpty ? nil : bag
+    }
+}
+
+extension ItemRecord {
+    /// `Receiving Notes` is an imported Airtable column, while `notes` is the
+    /// app's convenient fixed property. Keep the two in step before a form
+    /// sends the row to the store, otherwise an edited note is lost on export.
+    mutating func syncReceivingNotes() {
+        extra.set(colReceivingNotes, notes)
     }
 }
 

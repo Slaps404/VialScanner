@@ -38,10 +38,9 @@ struct NewVialSheet: View {
     /// is derived, not entered.
     @State private var vialNameOverridden = false
 
-    /// The sheet builds `Vial Name` the way the base does: AbNo, then the
-    /// antibody name (which is itself target + clone + catalog). It is a handle
-    /// onto fields that already exist, so typing it by hand only lets it drift
-    /// from its own parts.
+    /// The bundled inventory makes `Vial Name` the AbNo followed by the
+    /// imported `Antibody Definitions` value. That is a source-backed handle,
+    /// while a clone alone is only a field on the antibody definition.
     private var composedVialName: String {
         [draft.abNo, draft.definitionName]
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -114,7 +113,7 @@ struct NewVialSheet: View {
                                         .foregroundStyle(Theme.accent)
                                 }
                             }
-                            KeyValueRow(key: "Clone", value: linkedClone)
+                            KeyValueRow(key: "Clone (from antibody)", value: linkedClone)
                             LabeledField(title: "Lot", text: $draft.lot, mono: true, source: sources["Lot"])
                             LabeledField(title: "Concentration", text: $draft.concentration, source: sources["Concentration"])
                             LabeledField(title: "Size", text: bagField(colVolume), source: sources[colVolume])
@@ -208,6 +207,7 @@ struct NewVialSheet: View {
 
     private func save() {
         var v = draft
+        v.syncReceivingNotes()
         v.receivedAt = Date()
         let saved = store.addVial(v)
         onSave(saved)
@@ -341,7 +341,7 @@ struct ExtraColumnsCard: View {
     }
 
     private func field(_ c: FormColumn) -> Binding<String> {
-        Binding(get: { bag.value(c.column) }, set: { bag.set(c.column, $0) })
+        Binding(get: { bag.value(c.columns) }, set: { bag.set(c.columns, $0) })
     }
 
     var body: some View {

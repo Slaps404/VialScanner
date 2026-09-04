@@ -194,10 +194,11 @@ struct ReviewDetail: View {
                                     if !catalog.isEmpty { s["Catalog #"] = record.barcode != nil ? .barcode : .ocr }
                                     if !clone.isEmpty { s["Clone"] = .ocr }
                                     if !vendor.isEmpty { s["Vendor"] = .ocr }
-                                    var name = [vendor, clone.isEmpty ? nil : "Clone \(clone)"]
-                                        .compactMap { $0 }.joined(separator: " ")
-                                    if name.isEmpty { name = "Cat \(catalog)" }
-                                    prefillDef = DefRecord(name: name, clone: clone, vendor: vendor,
+                                    // Clone and vendor are fields on a definition,
+                                    // not a source-backed antibody name. Leave
+                                    // Name for the operator instead of inventing
+                                    // `Vendor Clone ...` or `Cat ...` semantics.
+                                    prefillDef = DefRecord(name: "", clone: clone, vendor: vendor,
                                                             catalog: catalog, isLocal: true)
                                 }
                             }
