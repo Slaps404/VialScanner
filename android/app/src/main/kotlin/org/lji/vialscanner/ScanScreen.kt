@@ -257,9 +257,10 @@ fun ScanScreen(
                     },
                     tip,
                 ) { Haptics.commit(); controller.rescan(recordThisScan) }
-                else -> ScanningControls(state as ScanState.Scanning) {
-                    controller.finishNow()
-                }
+                else -> ScanningControls(
+                    state as ScanState.Scanning,
+                    onCancel = { Haptics.tap(); controller.cancelScan(); clipNote = "" },
+                ) { controller.finishNow() }
             }
         }
 
@@ -671,7 +672,11 @@ private fun Shutter(onClick: () -> Unit) {
 // ---- Scanning --------------------------------------------------------------
 
 @Composable
-private fun ScanningControls(state: ScanState.Scanning, onReadNow: () -> Unit) {
+private fun ScanningControls(
+    state: ScanState.Scanning,
+    onCancel: () -> Unit,
+    onReadNow: () -> Unit,
+) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(
             Modifier.fillMaxWidth().clip(CircleShape).background(Color.Black.copy(alpha = 0.5f))
@@ -715,13 +720,27 @@ private fun ScanningControls(state: ScanState.Scanning, onReadNow: () -> Unit) {
         }
         Spacer(Modifier.height(14.dp))
 
-        Text(
-            "Read what you have",
-            color = Color.Black, fontSize = Type.label, fontWeight = Type.labelWeight,
-            modifier = Modifier
-                .clip(CircleShape).background(Color.White).clickable(onClick = onReadNow)
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-        )
+        // Two ways out, and they are not the same thing. "Read what you have"
+        // ends the scan with a verdict built from partial evidence; Cancel
+        // abandons it and keeps nothing. Offering only the first meant anyone
+        // wanting out pressed it and got a thin result they never asked for.
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                "Cancel",
+                color = Color.White, fontSize = Type.label, fontWeight = Type.labelWeight,
+                modifier = Modifier
+                    .clip(CircleShape).background(Color.Black.copy(alpha = 0.5f))
+                    .clickable(onClick = onCancel)
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+            )
+            Text(
+                "Read what you have",
+                color = Color.Black, fontSize = Type.label, fontWeight = Type.labelWeight,
+                modifier = Modifier
+                    .clip(CircleShape).background(Color.White).clickable(onClick = onReadNow)
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+            )
+        }
     }
 }
 
@@ -893,6 +912,9 @@ private fun attachClip(
     wantsKeep: Boolean,
     note: String = "",
 ): String? {
+    // The debug bundle is written for every scan, even when its clip is thrown
+    // away. Keep the operator's expectation beside the machine result either way.
+    controller.updateDebugExpectation(note)
     val temp = if (wantsKeep) controller.consumePendingClip() else null
     val name = store.keepClip(temp)
     if (name == null) controller.discardPendingClip()
@@ -944,6 +966,8 @@ private fun clipMetadata(
             androidVersion = android.os.Build.VERSION.RELEASE ?: android.os.Build.VERSION.SDK_INT.toString(),
             appVersion = BuildConfig.VERSION_NAME,
         ),
+        debugScanID = controller.debugScanID,
+        debugBundle = controller.debugBundleReference,
     )
 }
 
