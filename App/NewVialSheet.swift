@@ -34,6 +34,32 @@ struct NewVialSheet: View {
     @State private var creatingDefinition = false
     @State private var newDef = DefRecord(name: "")
     @State private var offeredPrefill = false
+    /// Set the moment somebody types in the vial-name box. Until then the name
+    /// is derived, not entered.
+    @State private var vialNameOverridden = false
+
+    /// The sheet builds `Vial Name` the way the base does: AbNo, then the
+    /// antibody name (which is itself target + clone + catalog). It is a handle
+    /// onto fields that already exist, so typing it by hand only lets it drift
+    /// from its own parts.
+    private var composedVialName: String {
+        [draft.abNo, draft.definitionName]
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func syncVialName() {
+        guard !vialNameOverridden else { return }
+        draft.vialName = composedVialName
+    }
+
+    /// Clone belongs to the antibody, not the tube, but the base rolls it back
+    /// onto the vial row and so does this sheet: somebody holding a vial reads
+    /// the clone off the label and wants to see it here, not one screen away.
+    private var linkedClone: String {
+        store.definition(named: draft.definitionName)?.clone ?? ""
+    }
 
     var body: some View {
         NavigationStack {
@@ -74,7 +100,21 @@ struct NewVialSheet: View {
                         VStack(alignment: .leading, spacing: 12) {
                             SectionLabel(text: "Vial")
                             LabeledField(title: "AbNo", text: $draft.abNo, mono: true)
-                            LabeledField(title: "Vial name", text: $draft.vialName)
+                                .onChange(of: draft.abNo) { _, _ in syncVialName() }
+                            LabeledField(title: "Vial name", text: Binding(
+                                get: { draft.vialName },
+                                set: { vialNameOverridden = true; draft.vialName = $0 }))
+                            if vialNameOverridden, draft.vialName != composedVialName {
+                                Button {
+                                    vialNameOverridden = false
+                                    syncVialName()
+                                } label: {
+                                    Label("Rebuild from AbNo and antibody", systemImage: "arrow.counterclockwise")
+                                        .font(Theme.caption)
+                                        .foregroundStyle(Theme.accent)
+                                }
+                            }
+                            KeyValueRow(key: "Clone", value: linkedClone)
                             LabeledField(title: "Lot", text: $draft.lot, mono: true, source: sources["Lot"])
                             LabeledField(title: "Concentration", text: $draft.concentration, source: sources["Concentration"])
                             LabeledField(title: "Size", text: bagField(colVolume), source: sources[colVolume])
@@ -129,7 +169,7 @@ struct NewVialSheet: View {
             .sheet(isPresented: $pickingDefinition) {
                 DefinitionPicker { def in
                     draft.definitionName = def.name
-                    if draft.vialName.isEmpty { draft.vialName = def.name }
+                    syncVialName()
                 }
                 .environmentObject(store)
             }
@@ -137,11 +177,12 @@ struct NewVialSheet: View {
                 NewDefinitionSheet(def: $newDef, sources: sources) { saved in
                     let added = store.addDefinition(saved)
                     draft.definitionName = added.name
-                    if draft.vialName.isEmpty { draft.vialName = added.name }
+                    syncVialName()
                 }
                 .environmentObject(store)
             }
             .onAppear {
+                syncVialName()
                 // NEW VIAL is the main path (most scans end here), so the
                 // definition step opens by itself instead of waiting for
                 // someone to find "this antibody is not on file either".
