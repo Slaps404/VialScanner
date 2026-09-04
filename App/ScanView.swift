@@ -484,7 +484,8 @@ struct ScanView: View {
         // an unattended pass that gets it wrong is exactly the case where the
         // video is the only way to find out what happened.
         let record = keepClip || store.settings.alwaysKeepClips || store.settings.handsFree
-        camera.startScan(recordClip: record)
+        camera.startScan(recordClip: record,
+                         accuracyCapture: store.settings.debugAccuracyCapture)
     }
 
     private func handleResult() {
@@ -585,11 +586,16 @@ struct ScanView: View {
     /// holding the tube can see which of the listed vials it actually is.
     private func confirm(_ result: ScanResult, abNo overrideAbNo: String? = nil) {
         cancelAuto()
-        let clip = (keepClip || store.settings.alwaysKeepClips)
-            ? store.keepClip(at: camera.consumePendingClip())
+        let tempClip = (keepClip || store.settings.alwaysKeepClips)
+            ? camera.consumePendingClip()
             : nil
-        if let clip { store.writeClipSidecar(for: clip, note: clipNote) }
-        else { camera.discardPendingClip() }
+        let clip = store.keepClip(at: tempClip)
+        let artifact = clip == nil ? nil : camera.consumePendingDebugArtifact()
+        if let clip {
+            store.writeClipSidecar(for: clip, note: clipNote, artifact: artifact)
+        } else {
+            camera.discardPendingClip()
+        }
 
         var built = makeRecord(result, outcome: .confirmed, clip: clip)
         if let overrideAbNo {
@@ -639,7 +645,9 @@ struct ScanView: View {
         // That is the entire point of parking: someone else has to be able to
         // see what the camera saw.
         let clip = store.keepClip(at: camera.consumePendingClip())
-        if let clip { store.writeClipSidecar(for: clip, note: clipNote) }
+        let artifact = clip == nil ? nil : camera.consumePendingDebugArtifact()
+        if let clip { store.writeClipSidecar(for: clip, note: clipNote, artifact: artifact) }
+        else { camera.discardPendingDebugArtifact() }
         store.log(makeRecord(result, outcome: .review, clip: clip))
         Haptics.commit()
         store.banner = AppStore.Banner(
@@ -744,11 +752,16 @@ struct ScanView: View {
 
     private func receive(_ item: ItemRecord) {
         guard let result = camera.result else { return }
-        let clip = (keepClip || store.settings.alwaysKeepClips)
-            ? store.keepClip(at: camera.consumePendingClip())
+        let tempClip = (keepClip || store.settings.alwaysKeepClips)
+            ? camera.consumePendingClip()
             : nil
-        if let clip { store.writeClipSidecar(for: clip, note: clipNote) }
-        else { camera.discardPendingClip() }
+        let clip = store.keepClip(at: tempClip)
+        let artifact = clip == nil ? nil : camera.consumePendingDebugArtifact()
+        if let clip {
+            store.writeClipSidecar(for: clip, note: clipNote, artifact: artifact)
+        } else {
+            camera.discardPendingClip()
+        }
 
         var record = makeRecord(result, outcome: .received, clip: clip)
         record.abNo = item.abNo

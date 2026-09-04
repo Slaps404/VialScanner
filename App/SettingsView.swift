@@ -95,6 +95,15 @@ struct SettingsView: View {
                 }
                 .tint(Theme.accent)
 
+                Toggle(isOn: Binding(
+                    get: { store.settings.debugAccuracyCapture },
+                    set: { store.settings.debugAccuracyCapture = $0 }
+                )) {
+                    settingLabel("Keep recognizer images",
+                                 "Adds the half-resolution Vision inputs to each kept clip's debug bundle. Slower and larger, so use this while diagnosing a read.")
+                }
+                .tint(Theme.accent)
+
                 VStack(alignment: .leading, spacing: 6) {
                     settingLabel("Delete clips after", "Saved scans keep theirs until they are resolved.")
                     HStack(spacing: 8) {

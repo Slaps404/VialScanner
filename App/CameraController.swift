@@ -81,15 +81,25 @@ final class CameraController: NSObject, ObservableObject {
     private var busy = false
     private var recordClip = false
     private var startedAt = Date()
+    private var scanID = UUID()
     private var configured = false
     private var timer: Timer?
     private var lastAutoFocusUpdate = Date.distantPast
+    /// Captured in memory while a scan runs. It is moved to the result card only
+    /// after the engine and clip have finished, so a failed/cancelled scan leaves
+    /// no half-written diagnostic file behind.
+    private var debugCapture: ScanDebugRecorder?
+    private var pendingDebugArtifact: ScanDebugArtifact?
+    private var debugEngineFrame = 0
+    private var debugFramesSeen = 0
+    private var debugOCRFrames = 0
 
     init(catalog: Catalog, config: EngineConfig = EngineConfig()) {
         self.catalog = catalog
         self.config = config
         self.engine = ScanEngine(catalog: catalog, config: config)
         super.init()
+        installDebugHooks(on: self.engine)
     }
 
     deinit { timer?.invalidate() }
@@ -105,8 +115,27 @@ final class CameraController: NSObject, ObservableObject {
         visionQueue.async { [weak self] in
             guard let self else { return }
             let fresh = ScanEngine(catalog: catalog, config: config)
+            self.installDebugHooks(on: fresh)
             self.lock.lock(); self.engine = fresh; self.lock.unlock()
         }
+    }
+
+    /// Recognizer callbacks fire synchronously inside `ScanEngine.ingest`, so
+    /// they can be attached without a second OCR path or any per-frame logging.
+    private func installDebugHooks(on engine: ScanEngine) {
+        engine.onBarcode = { [weak self] barcode in
+            guard let self else { return }
+            self.activeDebugCapture()?.recordBarcode(barcode)
+        }
+        engine.onOCRFrame = { [weak self] observations in
+            guard let self else { return }
+            self.activeDebugCapture()?.recordOCR(observations)
+        }
+    }
+
+    private func activeDebugCapture() -> ScanDebugRecorder? {
+        lock.lock(); defer { lock.unlock() }
+        return debugCapture
     }
 
     // MARK: - Lifecycle
@@ -367,11 +396,12 @@ final class CameraController: NSObject, ObservableObject {
 
     // MARK: - Scanning
 
-    func startScan(recordClip: Bool) {
+    func startScan(recordClip: Bool, accuracyCapture: Bool = false) {
         guard permission == .authorized else { requestAccessAndConfigure(); return }
         configureIfNeeded()
 
         ClipRecorder.discard(pendingClip)
+        discardPendingDebugArtifact()
         result = nil
         framesSeen = 0
         ocrFrames = 0
@@ -382,13 +412,24 @@ final class CameraController: NSObject, ObservableObject {
         phase = .scanning
         pendingClip = nil
         startedAt = Date()
+        scanID = UUID()
         activeTextBoxes = []
+        debugEngineFrame = 0
+        debugFramesSeen = 0
+        debugOCRFrames = 0
+
+        let trace = recordClip
+            ? ScanDebugRecorder(mode: accuracyCapture ? .accuracy : .performance,
+                                scanID: scanID, startedAt: startedAt,
+                                catalog: catalog, config: config)
+            : nil
 
         lock.lock()
         engine.reset()
         scanning = true
         busy = false
         self.recordClip = recordClip
+        debugCapture = trace
         lock.unlock()
 
         isRecording = recordClip
@@ -426,9 +467,23 @@ final class CameraController: NSObject, ObservableObject {
         return url
     }
 
+    /// The metadata stays in memory until the matching clip is either kept or
+    /// discarded. Callers that keep a clip must consume both values together.
+    func consumePendingDebugArtifact() -> ScanDebugArtifact? {
+        lock.lock(); defer { lock.unlock() }
+        let artifact = pendingDebugArtifact
+        pendingDebugArtifact = nil
+        return artifact
+    }
+
+    func discardPendingDebugArtifact() {
+        lock.lock(); pendingDebugArtifact = nil; lock.unlock()
+    }
+
     func discardPendingClip() {
         ClipRecorder.discard(pendingClip)
         pendingClip = nil
+        discardPendingDebugArtifact()
     }
 
     private func endScan(discardClip: Bool) {
@@ -436,6 +491,7 @@ final class CameraController: NSObject, ObservableObject {
         scanning = false
         let wasRecording = recordClip
         recordClip = false
+        debugCapture = nil
         lock.unlock()
         stopTicking()
         publish {
@@ -445,6 +501,7 @@ final class CameraController: NSObject, ObservableObject {
         if wasRecording, discardClip {
             queue.async { [recorder] in recorder.cancel() }
         }
+        if discardClip { discardPendingDebugArtifact() }
     }
 
     private func deliver(_ r: ScanResult) {
@@ -453,9 +510,26 @@ final class CameraController: NSObject, ObservableObject {
         scanning = false
         let wasRecording = recordClip
         recordClip = false
+        let trace = debugCapture
+        debugCapture = nil
+        let framesSeen = debugFramesSeen
+        let ocrFrames = debugOCRFrames
         lock.unlock()
 
         stopTicking()
+
+        let artifact = trace?.finish(
+            result: r,
+            evidence: engine.accumulated,
+            endedAt: Date(),
+            framesSeen: framesSeen,
+            ocrFramesUsed: ocrFrames,
+            roiInset: roiInset,
+            optics: debugOpticsMetadata()
+        )
+        lock.lock()
+        pendingDebugArtifact = artifact
+        lock.unlock()
 
         guard wasRecording else {
             publishResult(r, clip: nil)
@@ -478,6 +552,50 @@ final class CameraController: NSObject, ObservableObject {
             self.activeTextBoxes = []
             self.hint = r.verdict.headline
         }
+    }
+
+    private var roiInset: Double {
+        // The trace keeps the engine's actual rectangle. This value is only a
+        // compact compatibility field for the Android capture metadata shape.
+        let roi = config.regionOfInterest
+        guard let roi else { return 0 }
+        return max(0, min(0.5, min(roi.minX, roi.minY / 1.3)))
+    }
+
+    /// Snapshot optics on the Vision queue after the final frame. Device and
+    /// format properties are read-only here, while the session is still alive.
+    private func debugOpticsMetadata() -> DebugOpticsMetadata {
+        guard let device else {
+            return DebugOpticsMetadata(deviceType: nil, position: nil,
+                                       sessionPreset: session.sessionPreset.rawValue,
+                                       activeFormatWidth: nil, activeFormatHeight: nil,
+                                       pixelFormat: nil, userZoom: userZoom,
+                                       avZoomFactor: nil, minZoom: nil, maxZoom: nil,
+                                       focusMode: nil, autofocusRangeRestriction: nil,
+                                       focusLocked: isFocusLocked, focusPoint: focusPoint.map(DebugPoint.init),
+                                       torchOn: torchOn, hasTorch: hasTorch)
+        }
+        let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        let pixel = output.videoSettings[kCVPixelBufferPixelFormatTypeKey as String] as? NSNumber
+        let pixelFormat = pixel.map { String(format: "0x%08X", $0.uint32Value) }
+        return DebugOpticsMetadata(
+            deviceType: device.deviceType.rawValue,
+            position: device.position == .back ? "back" : device.position == .front ? "front" : "unspecified",
+            sessionPreset: session.sessionPreset.rawValue,
+            activeFormatWidth: Int(dims.width),
+            activeFormatHeight: Int(dims.height),
+            pixelFormat: pixelFormat,
+            userZoom: userZoom,
+            avZoomFactor: Double(device.videoZoomFactor),
+            minZoom: Double(device.minAvailableVideoZoomFactor),
+            maxZoom: Double(device.maxAvailableVideoZoomFactor),
+            focusMode: device.debugFocusMode,
+            autofocusRangeRestriction: device.debugAutofocusRangeRestriction,
+            focusLocked: isFocusLocked,
+            focusPoint: focusPoint.map(DebugPoint.init),
+            torchOn: torchOn,
+            hasTorch: device.hasTorch
+        )
     }
 
     // MARK: - Torch
@@ -535,11 +653,23 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         let isScanning = scanning
         let wantsClip = recordClip
         let alreadyBusy = busy
+        let trace = debugCapture
         if isScanning, !alreadyBusy { busy = true }
         let engine = self.engine
+        let engineConfig = config
         lock.unlock()
 
         guard isScanning else { return }
+
+        let format = CMSampleBufferGetFormatDescription(sampleBuffer)
+        let dimensions = format.map(CMVideoFormatDescriptionGetDimensions)
+        let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
+        let pixelFormat = pixelBuffer.map { String(format: "0x%08X", CVPixelBufferGetPixelFormatType($0)) }
+        let ts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        let sequence = trace?.capture(timestamp: ts,
+                                      width: Int(dimensions?.width ?? 0),
+                                      height: Int(dimensions?.height ?? 0),
+                                      pixelFormat: pixelFormat)
 
         if wantsClip {
             if !recorder.isRecording { recorder.begin(with: sampleBuffer) }
@@ -548,13 +678,51 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         // Drop frames while a pass is in flight rather than queueing them; stale
         // frames are worth nothing and the buffer pool is finite.
-        guard !alreadyBusy, let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let ts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        guard !alreadyBusy else {
+            if let sequence { trace?.markDropped(sequence, reason: "vision_busy") }
+            return
+        }
+        guard let pb = pixelBuffer else {
+            if let sequence { trace?.markDropped(sequence, reason: "no_pixel_buffer") }
+            lock.lock(); busy = false; lock.unlock()
+            return
+        }
+        guard let sequence else {
+            // A trace is normally present whenever a clip is being recorded.
+            // The engine still runs when it is not, so keep this path separate.
+            visionQueue.async { [weak self] in
+                guard let self else { return }
+                let frame = engine.makeFrame(pixelBuffer: pb, timestamp: ts)
+                let state = engine.ingest(frame)
+                self.lock.lock(); self.busy = false; self.lock.unlock()
+                self.handle(state)
+            }
+            return
+        }
 
         visionQueue.async { [weak self] in
             guard let self else { return }
+            self.lock.lock()
+            let stillScanning = self.scanning
+            self.debugEngineFrame += 1
+            let engineFrame = self.debugEngineFrame
+            self.lock.unlock()
+            guard stillScanning else {
+                trace?.markCanceled(sequence)
+                self.lock.lock(); self.busy = false; self.lock.unlock()
+                return
+            }
+
+            let barcodeAttempted = engineConfig.barcodeEveryNthFrame > 0
+                && (engineFrame - 1) % engineConfig.barcodeEveryNthFrame == 0
+            trace?.beginProcessing(sequence, barcodeAttempted: barcodeAttempted)
+            let started = DispatchTime.now().uptimeNanoseconds
             let frame = engine.makeFrame(pixelBuffer: pb, timestamp: ts)
             let state = engine.ingest(frame)
+            let ingestMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+
+            var debugState: DebugEngineState?
+            var resultFinished = false
 
             self.lock.lock()
             self.busy = false
@@ -562,6 +730,12 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
 
             switch state {
             case .scanning(let seen, let ocr, let views, let progress, let hint, let textBoxes):
+                self.debugFramesSeen = seen
+                self.debugOCRFrames = ocr
+                debugState = DebugEngineState(kind: "scanning", framesSeen: seen,
+                                              ocrFrames: ocr, views: views,
+                                              progress: progress, hint: hint,
+                                              textBoxes: textBoxes.map(DebugRect.init))
                 self.updateTextAutoFocus(with: textBoxes)
                 self.publish {
                     guard self.phase == .scanning else { return }
@@ -573,8 +747,61 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
                     self.activeTextBoxes = textBoxes
                 }
             case .finished(let r):
+                resultFinished = true
+                self.debugFramesSeen = engineFrame
+                // `ScanResult.framesUsed` is the evidence-buffer count, which
+                // includes empty OCR passes. Keep the engine's OCR counter from
+                // the last scanning state instead.
+                let finalOCRFrames = self.debugOCRFrames
+                debugState = DebugEngineState(kind: "finished", framesSeen: engineFrame,
+                                              ocrFrames: finalOCRFrames,
+                                              views: engine.accumulated.distinctViews,
+                                              progress: 1,
+                                              hint: r.verdict.headline,
+                                              textBoxes: [])
+            }
+            trace?.finishProcessing(sequence, engineFrame: engineFrame,
+                                    state: debugState, resultFinished: resultFinished,
+                                    ingestMilliseconds: ingestMilliseconds)
+            if trace?.wantsImage(for: sequence) == true,
+               let image = Self.accuracyImage(from: frame) {
+                trace?.storeImage(image, for: sequence)
+            }
+
+            switch state {
+            case .scanning:
+                break
+            case .finished(let r):
                 self.deliver(r)
             }
+        }
+    }
+
+    /// The recorder needs the same half-resolution luma image Vision receives.
+    /// This is only called in accuracy mode and the image is retained in memory;
+    /// Store writes it after the scan, so this never adds a per-frame file write.
+    private static func accuracyImage(from frame: VialFrame) -> CGImage? {
+        switch frame.source {
+        case .pixelBuffer(let pb): return VialFrame.scaledGray(from: pb, scale: 0.5)
+        case .cgImage(let image): return image
+        }
+    }
+
+    /// Non-recording scans do not need a trace, but they still share this state
+    /// handling path so the debug instrumentation cannot change scan behavior.
+    private func handle(_ state: ScanState) {
+        switch state {
+        case .scanning(let seen, let ocr, let views, let progress, let hint, let textBoxes):
+            debugFramesSeen = seen
+            debugOCRFrames = ocr
+            updateTextAutoFocus(with: textBoxes)
+            publish {
+                guard self.phase == .scanning else { return }
+                self.framesSeen = seen; self.ocrFrames = ocr; self.views = views
+                self.progress = progress; self.hint = hint; self.activeTextBoxes = textBoxes
+            }
+        case .finished(let r):
+            deliver(r)
         }
     }
 }

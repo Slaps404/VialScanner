@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import ImageIO
 import VialCore
 
 /// Everything the app owns that outlives a scan.
@@ -277,6 +278,14 @@ final class AppStore: ObservableObject {
         clipsDir.appendingPathComponent((name as NSString).deletingPathExtension + ".json")
     }
 
+    /// Accuracy-mode recognizer inputs live beside, rather than inside, the
+    /// JSON. Keeping the directory tied to the clip basename makes copying a
+    /// clip and its bundle from Files straightforward.
+    static func clipDebugDirectoryURL(_ name: String) -> URL {
+        let base = (name as NSString).deletingPathExtension
+        return clipsDir.appendingPathComponent(base + "-frames", isDirectory: true)
+    }
+
     /// Move a just-recorded temp file into permanent storage. Returns the stored
     /// filename, or nil when there was nothing to keep.
     func keepClip(at temp: URL?) -> String? {
@@ -287,6 +296,9 @@ final class AppStore: ObservableObject {
             try FileManager.default.moveItem(at: temp, to: dest)
             return name
         } catch {
+            // The source is a disposable recording. Do not leave it in the
+            // temporary directory when the move fails.
+            try? FileManager.default.removeItem(at: temp)
             banner = Banner(text: "Could not save the clip: \(error.localizedDescription)", isError: true)
             return nil
         }
@@ -305,6 +317,50 @@ final class AppStore: ObservableObject {
         try? data.write(to: Self.clipSidecarURL(clipName), options: .atomic)
     }
 
+    /// Writes the complete buffered debug bundle after the matching clip has
+    /// been moved into permanent storage. Accuracy images are encoded here, not
+    /// on the capture queue, so performance-mode scans never pay disk or image
+    /// encoding work per frame.
+    func writeClipSidecar(for clipName: String, note: String, artifact: ScanDebugArtifact?) {
+        guard var artifact else {
+            writeClipSidecar(for: clipName, note: note)
+            return
+        }
+
+        artifact.bundle.clip = clipName
+        artifact.bundle.note = note
+        artifact.bundle.expect = parseClipNote(note).map(ClipExpectationDTO.init)
+
+        var imageFiles: [String] = []
+        if artifact.bundle.accuracy.enabled, !artifact.images.isEmpty {
+            let directory = Self.clipDebugDirectoryURL(clipName)
+            try? FileManager.default.createDirectory(at: directory,
+                                                      withIntermediateDirectories: true)
+            for retained in artifact.images {
+                let file = String(format: "frame-%06d.png", retained.sequence)
+                let url = directory.appendingPathComponent(file)
+                guard Self.writePNG(retained.image, to: url) else { continue }
+                imageFiles.append(directory.lastPathComponent + "/" + file)
+            }
+        }
+        artifact.bundle.accuracy = DebugAccuracyMetadata(
+            enabled: artifact.bundle.accuracy.enabled,
+            policy: artifact.bundle.accuracy.policy,
+            imageFiles: imageFiles
+        )
+
+        guard let data = try? JSONEncoder.vial.encode(artifact.bundle) else { return }
+        try? data.write(to: Self.clipSidecarURL(clipName), options: .atomic)
+    }
+
+    private static func writePNG(_ image: CGImage, to url: URL) -> Bool {
+        guard let destination = CGImageDestinationCreateWithURL(
+            url as CFURL, "public.png" as CFString, 1, nil
+        ) else { return false }
+        CGImageDestinationAddImage(destination, image, nil)
+        return CGImageDestinationFinalize(destination)
+    }
+
     private static let iso8601UTC: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.timeZone = TimeZone(secondsFromGMT: 0)
@@ -314,6 +370,7 @@ final class AppStore: ObservableObject {
     func deleteClip(named name: String) {
         try? FileManager.default.removeItem(at: Self.clipURL(name))
         try? FileManager.default.removeItem(at: Self.clipSidecarURL(name))
+        try? FileManager.default.removeItem(at: Self.clipDebugDirectoryURL(name))
     }
 
     var clipBytes: Int64 {

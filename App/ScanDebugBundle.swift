@@ -313,6 +313,7 @@ struct DebugCaptureMetadata: Codable, Equatable {
 struct DebugResultSummary: Codable, Equatable {
     let verdict: String
     let evidenceLevel: String
+    let readNothing: Bool
     let definitionName: String?
     let abNo: String?
     let catalog: String?
@@ -331,6 +332,7 @@ struct DebugResultSummary: Codable, Equatable {
     init(_ result: ScanResult) {
         verdict = result.verdict.rawValue
         evidenceLevel = result.evidenceLevel.rawValue
+        readNothing = result.readNothing
         definitionName = result.definition?.name
         abNo = result.vial?.abNo
         catalog = result.fields[.catalog] ?? result.barcode?.catalog ?? result.definition?.catalog
