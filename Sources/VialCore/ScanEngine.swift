@@ -110,6 +110,11 @@ public struct EngineConfig: Sendable {
     /// OCR passes added to the budget with each extension. Without this the
     /// extra seconds would be spent on frames the budget no longer allows.
     public var ocrFramesPerExtension = 12
+    /// Minimum stream time reserved for a new or unresolved vial to expose its
+    /// label. A deliberate hand rotation takes about 3-5 seconds; saturation
+    /// before this point can only mean that the currently visible face was read
+    /// repeatedly, not that the label was harvested.
+    public var minHarvestDuration: Double = 5.0
     public var match = MatchConfig()
     public init() {}
 }
@@ -236,9 +241,14 @@ public final class ScanEngine {
                 let r = matcher.resolve(evidence, standard: .corroborated)
                 lastStandard = .corroborated
                 switch r.verdict {
-                case .certain:
+                case .certain where catalogued(r):
                     settled = r
                     return .finished(r)
+                case .certain:
+                    // A known definition with an off-record lot is a new lot,
+                    // not a finished inventory match. Keep harvesting the label
+                    // so the receive form gets the fields around the barcode.
+                    break
                 case .notFound where harvestSatisfied(elapsed: elapsed):
                     // The code named a product that is not on file. That verdict
                     // is definitive, but the label still has to be read: those
@@ -339,13 +349,13 @@ public final class ScanEngine {
                 settled = r
                 return .finished(r)
             }
-            let extension = min(config.graceExtension, config.hardScanCeiling - elapsed)
-            guard extension > 0 else {
+            let extraTime = min(config.graceExtension, config.hardScanCeiling - elapsed)
+            guard extraTime > 0 else {
                 settled = r
                 return .finished(r)
             }
             extensionsGranted += 1
-            deadline = elapsed + extension
+            deadline = elapsed + extraTime
             ocrBudget += config.ocrFramesPerExtension
         }
 

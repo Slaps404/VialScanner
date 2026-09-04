@@ -112,6 +112,10 @@ class EngineConfig {
     var hardScanCeiling: Double = 20.0
     /** OCR passes added with each extension, so the extra seconds are usable. */
     var ocrFramesPerExtension = 12
+    /** Minimum stream time reserved for a new or unresolved vial to expose its
+     * label. A deliberate hand rotation takes about 3-5 seconds; saturation
+     * before this point only means that one visible face was read repeatedly. */
+    var minHarvestDuration: Double = 5.0
     var match = MatchConfig()
 }
 
@@ -201,7 +205,7 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
                 evidence.hasConfirmedBarcode(config.barcodeConfirmations)
             ) {
                 val r = matcher.resolve(evidence, EvidenceStandard.CORROBORATED)
-                if (r.verdict == Verdict.CERTAIN) {
+                if (catalogued(r)) {
                     settled = r
                     return ScanState.Finished(r)
                 }
@@ -209,7 +213,7 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
                 // definitive, but the label still has to be read: those fields
                 // pre-fill the receive form, and stopping on the decode alone
                 // hands the user an empty card for a vial they must now type in.
-                if (r.verdict == Verdict.NOT_FOUND && coverageSatisfied) {
+                if (r.verdict == Verdict.NOT_FOUND && harvestSatisfied(elapsed)) {
                     settled = r
                     return ScanState.Finished(r)
                 }
@@ -263,35 +267,39 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
                 coverageSatisfied
             ) {
                 val r = matcher.resolve(evidence, EvidenceStandard.CORROBORATED)
-                if ((r.verdict == Verdict.CERTAIN || r.verdict == Verdict.CONFIDENT) && confirmed(r)) {
+                if (catalogued(r) && confirmed(r)) {
                     settled = r
                     return ScanState.Finished(r)
                 }
             }
         }
 
-        if (elapsed >= deadline) {
+        if (elapsed >= deadline || elapsed >= config.hardScanCeiling) {
             val r = matcher.resolve(evidence)
             // Only stop on the deadline if there is something to stop *with*.
             // SUFFICIENT means retrievable fields were read, not that they
             // retrieved anything, so a non-answer still spends an extension:
             // the rest of the label is hidden around the curve of the vial.
-            val answered = r.evidenceLevel == EvidenceLevel.SUFFICIENT &&
-                (r.verdict == Verdict.CERTAIN || r.verdict == Verdict.CONFIDENT)
+            val answered = catalogued(r)
             // Extend while the label is still yielding, not a fixed number of
             // times. Counting attempts stops a vial mid-rotation; saturation
             // asks whether more waiting can buy more evidence. See README
             // "Two goals, opposite stopping rules".
-            val exhausted = evidence.framesSinceNewToken >= config.saturationFrames
+            val exhausted = harvestSatisfied(elapsed)
             if (answered ||
                 exhausted ||
-                elapsed + config.graceExtension > config.hardScanCeiling
+                elapsed >= config.hardScanCeiling
             ) {
                 settled = r
                 return ScanState.Finished(r)
             }
+            val extension = minOf(config.graceExtension, config.hardScanCeiling - elapsed)
+            if (extension <= 0.0) {
+                settled = r
+                return ScanState.Finished(r)
+            }
             extensionsGranted += 1
-            deadline = elapsed + config.graceExtension
+            deadline = elapsed + extension
             ocrBudget += config.ocrFramesPerExtension
         }
 
@@ -321,6 +329,19 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
     private val coverageSatisfied: Boolean
         get() = evidence.distinctViews >= config.minDistinctViews ||
             evidence.framesSinceNewToken >= config.saturationFrames
+
+    /** A new or unresolved vial gets a real rotation window before repeated
+     * reads of one face can end the scan. New tokens reset saturation. */
+    private fun harvestSatisfied(elapsed: Double): Boolean =
+        elapsed >= maxOf(0.0, config.minHarvestDuration) &&
+            evidence.framesSinceNewToken >= config.saturationFrames
+
+    /** Only a catalogued identity may take the fast path. A known definition
+     * with a lot absent from inventory still needs the full harvest. */
+    private fun catalogued(result: ScanResult): Boolean =
+        result.evidenceLevel == EvidenceLevel.SUFFICIENT &&
+            (result.verdict == Verdict.CERTAIN || result.verdict == Verdict.CONFIDENT) &&
+            !result.lotNotOnRecord
 
     /** A verdict may only end the scan once it has come back `settleConfirmations`
      *  resolves running: one that flickers between two definitions is not an
