@@ -133,6 +133,11 @@ struct NewVialSheet: View {
                         }
                     }
 
+                    ExtraColumnsCard(title: "More vial fields",
+                                     columns: vialFormColumns,
+                                     bag: $draft.extra,
+                                     sources: sources)
+
                     Card {
                         VStack(alignment: .leading, spacing: 12) {
                             SectionLabel(text: "Notes")
@@ -288,6 +293,11 @@ struct NewDefinitionSheet: View {
                             LabeledField(title: "Catalog #", text: $def.catalog, mono: true, source: sources["Catalog #"])
                         }
                     }
+                    ExtraColumnsCard(title: "More antibody fields",
+                                     columns: definitionFormColumns,
+                                     bag: $def.extra,
+                                     sources: sources)
+
                     Notice(text: "New definitions are matched by catalog number on the next scan, so get that field right even if the rest is blank.",
                            tint: Theme.accent, icon: "info.circle")
 
@@ -306,6 +316,61 @@ struct NewDefinitionSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }.foregroundStyle(Theme.textSecond)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Extra columns
+
+/// The columns from `vialFormColumns` / `definitionFormColumns`, folded away by
+/// default. Eleven more boxes stacked above "Add to inventory" would turn the
+/// common case - scan, glance, save - into a scroll, but a vial that needs its
+/// formulation recorded should not require a trip to Airtable either.
+struct ExtraColumnsCard: View {
+    let title: String
+    let columns: [FormColumn]
+    @Binding var bag: FieldBag?
+    var sources: [String: FieldSource] = [:]
+
+    @State private var expanded = false
+
+    private var filled: Int {
+        columns.filter { !bag.value($0.column).isEmpty }.count
+    }
+
+    private func field(_ c: FormColumn) -> Binding<String> {
+        Binding(get: { bag.value(c.column) }, set: { bag.set(c.column, $0) })
+    }
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 12) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() }
+                } label: {
+                    HStack {
+                        SectionLabel(text: title)
+                        // Folded is not hidden: a count means nobody has to open
+                        // the section to find out whether anything is in it.
+                        if filled > 0 {
+                            Text("\(filled) filled")
+                                .font(Theme.caption)
+                                .foregroundStyle(Theme.textSecond)
+                        }
+                        Spacer()
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Theme.textFaint)
+                    }
+                }
+                .buttonStyle(PressScale())
+
+                if expanded {
+                    ForEach(columns, id: \.column) { c in
+                        LabeledField(title: c.title, text: field(c), source: sources[c.column])
+                    }
                 }
             }
         }

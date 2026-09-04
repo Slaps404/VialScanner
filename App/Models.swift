@@ -350,6 +350,45 @@ struct AppSettings: Codable {
 let colVolume = "Initial Volume"
 let colExpiry = "Expiration Date"
 let colStorage = "Storage Temperature"
+/// Printed on vials as "Order No." and carried by no Airtable column, so it
+/// lives in the bag like expiry and storage temperature do.
+let colOrderNo = "Order No"
+
+/// One editable column in a form: what to call it on screen, and the printed
+/// header it reads and writes.
+struct FormColumn: Hashable {
+    let title: String
+    let column: String
+}
+
+// Columns the base carries that the fixed schema has no named slot for. Listing
+// them here rather than in each sheet is what keeps the receiving form and the
+// edit form from drifting apart. Rollups and links (Validations, Panel
+// Configurations, Staining Log, Conjugations, Child Vial) are deliberately
+// absent: they are computed in Airtable, not typed at a freezer, and they still
+// show in the read-only carried-fields list.
+let vialFormColumns: [FormColumn] = [
+    FormColumn(title: "Category", column: "Ab Category"),
+    FormColumn(title: "Conjugate", column: "Conjugate"),
+    FormColumn(title: "Amount", column: "Amount"),
+    FormColumn(title: "Formulation", column: "Formulation"),
+    FormColumn(title: "Current volume", column: "Current Volume"),
+    FormColumn(title: "Dilute to 2 ug/ml", column: "Dilute to 2 ug/ml"),
+    FormColumn(title: "Volume from parent", column: "Volume Taken From Parent"),
+    FormColumn(title: "Total conjugated", column: "Total Volume Conjugated"),
+    FormColumn(title: "Parent vial", column: "Parent Vial"),
+    FormColumn(title: "Projects", column: "Projects"),
+    FormColumn(title: "Order no", column: colOrderNo),
+]
+
+let definitionFormColumns: [FormColumn] = [
+    FormColumn(title: "Reactivity", column: "Reactivity Vendor"),
+    FormColumn(title: "Reactivity cited", column: "Reactivity Cited"),
+    FormColumn(title: "Product website", column: "Product Website"),
+    FormColumn(title: "Price", column: "Price"),
+    FormColumn(title: "Gene database", column: "Gene Database"),
+    FormColumn(title: "Protein database", column: "Protein Database"),
+]
 
 extension Optional where Wrapped == FieldBag {
     func value(_ name: String) -> String { self?[name] ?? "" }

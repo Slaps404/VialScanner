@@ -177,6 +177,12 @@ struct VialDetailSheet: View {
         store.scans.filter { $0.abNo == item.abNo }.prefix(12).map { $0 }
     }
 
+    /// A binding onto one named column of the extra bag. Same helper the
+    /// receiving sheet uses, for the same reason.
+    private func bagField(_ name: String) -> Binding<String> {
+        Binding(get: { draft.extra.value(name) }, set: { draft.extra.set(name, $0) })
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -190,6 +196,9 @@ struct VialDetailSheet: View {
                                 LabeledField(title: "Antibody", text: $draft.definitionName)
                                 LabeledField(title: "Lot", text: $draft.lot, mono: true)
                                 LabeledField(title: "Concentration", text: $draft.concentration)
+                                LabeledField(title: "Size", text: bagField(colVolume))
+                                LabeledField(title: "Expiration date", text: bagField(colExpiry))
+                                LabeledField(title: "Storage temp", text: bagField(colStorage))
                                 LabeledField(title: "Status", text: $draft.status)
                             }
                         }
@@ -201,6 +210,10 @@ struct VialDetailSheet: View {
                                 SuggestField(title: "Owner", text: $draft.owner, options: store.owners)
                             }
                         }
+                        ExtraColumnsCard(title: "More vial fields",
+                                         columns: vialFormColumns,
+                                         bag: $draft.extra)
+
                         Card {
                             VStack(alignment: .leading, spacing: 12) {
                                 SectionLabel(text: "Notes")
