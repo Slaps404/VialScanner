@@ -382,7 +382,7 @@ struct ClipSidecar: Codable {
 
 /// Codable mirror of `VialCore.ClipExpectation`: the engine's parser stays
 /// dependency-free, so the wire shape lives here.
-struct ClipExpectationDTO: Codable {
+struct ClipExpectationDTO: Codable, Equatable {
     var catalog: String?
     var lot: String?
     var clone: String?

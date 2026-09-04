@@ -72,7 +72,7 @@ public final class VialFrame {
 
     /// Downscale the luma plane with vImage. Never touches chroma and never
     /// allocates a CoreImage render, which is what keeps the OCR tier affordable.
-    static func scaledGray(from pb: CVPixelBuffer, scale: Double) -> CGImage? {
+    public static func scaledGray(from pb: CVPixelBuffer, scale: Double) -> CGImage? {
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
 
