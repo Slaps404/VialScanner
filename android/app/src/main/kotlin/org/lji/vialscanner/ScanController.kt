@@ -6,6 +6,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.graphics.Matrix
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -54,6 +55,7 @@ class ScanController(private val store: AppStore, context: Context) {
     private val analysisExecutor = Executors.newSingleThreadExecutor()
     private val clipRecorder = ClipRecorder(context)
     private val appContext = context.applicationContext
+    private val debugCapture = DebugCapture(appContext)
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     /**
      * The same seven symbologies Swift asks Vision for
@@ -160,6 +162,10 @@ class ScanController(private val store: AppStore, context: Context) {
     var pendingClip by mutableStateOf<File?>(null)
         private set
 
+    /** Link fields used by the kept-clip sidecar. */
+    val debugScanID: String? get() = debugCapture.currentScanID
+    val debugBundleReference: String? get() = debugCapture.currentBundleReference
+
     /** Frames the last *completed* scan saw, captured off the last `Scanning`
      *  state before it turned `Finished` - by the time a result exists, the
      *  engine has already discarded them. Feeds `ClipMetadata.capture`. */
@@ -177,6 +183,11 @@ class ScanController(private val store: AppStore, context: Context) {
     fun discardPendingClip() {
         ClipRecorder.discard(pendingClip)
         pendingClip = null
+    }
+
+    /** Persist the operator's expected label fields into the finished bundle. */
+    fun updateDebugExpectation(note: String) {
+        debugCapture.annotate(note)
     }
 
     private fun idle() = ScanState.Scanning(0, 0, 0, 0.0, "Line the label up")
@@ -201,6 +212,7 @@ class ScanController(private val store: AppStore, context: Context) {
      */
     fun rescan(recordClip: Boolean = false) {
         discardPendingClip()
+        debugCapture.begin(store)
         currentEngine().reset()
         state = idle()
         running = true
@@ -218,6 +230,7 @@ class ScanController(private val store: AppStore, context: Context) {
     fun cancelScan() {
         if (recordingClip) { clipRecorder.cancel(); recordingClip = false }
         discardPendingClip()
+        debugCapture.cancel()
         state = idle()
         running = false
         textBoxes = emptyList()
@@ -491,9 +504,10 @@ class ScanController(private val store: AppStore, context: Context) {
     }
 
     private fun analyze(proxy: ImageProxy) {
+        var bmp: Bitmap? = null
         try {
             if (!running || state is ScanState.Finished) return
-            val bmp = uprightBitmap(proxy)
+            bmp = uprightBitmap(proxy)
             if (!loggedChain) {
                 loggedChain = true
                 val r = proxy.cropRect
@@ -511,8 +525,27 @@ class ScanController(private val store: AppStore, context: Context) {
                 timestamp = proxy.imageInfo.timestamp / 1_000_000_000.0,
                 recognizer = recognizer,
                 scanner = scanner,
+                rotationDegrees = proxy.imageInfo.rotationDegrees,
+                captureMode = debugCapture.mode,
             )
-            val s = currentEngine().ingest(frame)
+            val e = currentEngine()
+            val tIngest = System.nanoTime()
+            val s = e.ingest(frame)
+            val msIngest = (System.nanoTime() - tIngest) / 1_000_000
+            debugCapture.record(
+                debugFrameInput(frame, e, s, msIngest),
+                DebugOpticsSample(
+                    image = frame.imageSize,
+                    crop = frame.ocrInputSize ?: frame.barcodeInputSize ?: frame.imageSize,
+                    rotationDegrees = frame.rotationDegrees,
+                    zoomRatio = zoomRatio,
+                    torchOn = torchOn,
+                    focusLocked = focusLocked,
+                    ultraWideFocuses = ultraWideFocuses,
+                    minZoom = minZoom,
+                    maxZoom = maxZoom,
+                ),
+            )
             if (s is ScanState.Scanning) {
                 lastFramesSeen = s.framesSeen
                 lastOcrFrames = s.ocrFrames
@@ -528,8 +561,57 @@ class ScanController(private val store: AppStore, context: Context) {
                 steerFocus(boxes)
             }
         } finally {
+            bmp?.takeIf { !it.isRecycled }?.recycle()
             proxy.close()
         }
+    }
+
+    private fun debugFrameInput(
+        frame: MlKitFrame,
+        engine: ScanEngine,
+        state: ScanState,
+        ingestMs: Long,
+    ): DebugFrameInput {
+        val scanning = state as? ScanState.Scanning
+        val finished = state as? ScanState.Finished
+        return DebugFrameInput(
+            timestampSeconds = frame.timestamp,
+            image = frame.imageSize,
+            rotationDegrees = frame.rotationDegrees,
+            sharpness = frame.sharpnessValue,
+            sharpnessMs = frame.sharpnessMs.takeIf { it >= 0 },
+            sharpnessEvaluated = frame.sharpnessEvaluated,
+            barcodeAttempted = frame.barcodeAttempted,
+            barcodeMs = frame.msBarcode.takeIf { it >= 0 },
+            barcodeInput = frame.barcodeInputSize,
+            barcodes = frame.lastBarcodes.map { BarcodeMetadata(it.raw, it.symbology, it.catalog, it.lot) },
+            ocrAttempted = frame.ocrAttempted,
+            ocrMs = frame.msOcr.takeIf { it >= 0 },
+            ocrInput = frame.ocrInputSize,
+            observations = frame.lastTextObservations.map { o ->
+                DebugTextObservation(
+                    text = o.text,
+                    confidence = o.confidence,
+                    boundingBox = o.boundingBox?.let { DebugNormRect(it.minX, it.minY, it.width, it.height) },
+                )
+            },
+            ingestMs = ingestMs,
+            engineState = if (finished == null) "scanning" else "finished",
+            engineFramesSeen = scanning?.framesSeen ?: finished?.result?.framesUsed,
+            engineOcrFrames = scanning?.ocrFrames ?: engine.accumulated.frameCount,
+            engineViews = scanning?.views ?: engine.accumulated.distinctViews,
+            engineProgress = scanning?.progress ?: 1.0,
+            engineHint = scanning?.hint,
+            // The engine intentionally keeps this decision private. These two
+            // public adapter signals still tell a reviewer whether the frame
+            // was paced away or failed the sharpness gate.
+            skipReason = when {
+                frame.ocrAttempted -> null
+                frame.sharpnessEvaluated -> "sharpness_gate"
+                else -> "pacing_or_budget"
+            },
+            ocrInputBytes = frame.takeAccuracyOcrInput(),
+        )
     }
 
     /** Force a verdict from whatever has been read (the user stopped rotating). */
@@ -544,6 +626,7 @@ class ScanController(private val store: AppStore, context: Context) {
      * on disk yet is a promise the app cannot keep.
      */
     private fun deliverFinished(result: ScanResult) {
+        debugCapture.finish(result)
         if (!recordingClip) {
             state = ScanState.Finished(result)
             return
@@ -580,6 +663,7 @@ class ScanController(private val store: AppStore, context: Context) {
     fun shutdown() {
         if (recordingClip) clipRecorder.cancel()
         discardPendingClip()
+        debugCapture.shutdown()
         analysisExecutor.shutdown()
         recognizer.close()
         scanner.close()
@@ -602,6 +686,11 @@ fun ultraWideCanFocus(context: Context): Boolean = runCatching {
         mgr.getCameraCharacteristics(it)[CameraCharacteristics.LENS_FACING] ==
             CameraCharacteristics.LENS_FACING_BACK
     } ?: return@runCatching true
+
+    // Physical-camera IDs were added in API 28. Older devices cannot tell us
+    // which sensor sits behind a logical zoom ratio, so keep the preference
+    // available rather than treating an unavailable query as fixed focus.
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return@runCatching true
 
     val chars = mgr.getCameraCharacteristics(back)
     val ids = chars.physicalCameraIds.ifEmpty { setOf(back) }

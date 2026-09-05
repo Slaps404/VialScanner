@@ -540,6 +540,20 @@ fun SettingsScreen(store: AppStore, openMenu: () -> Unit) {
                     { if (it == 0) "Never" else "${it}d" },
                 ) { store.updateSettings { c -> c.copy(clipRetentionDays = it) } }
             }
+
+            SectionCard("Debug capture") {
+                Text(
+                    "Each scan writes one JSON bundle under Android/media/org.lji.vialscanner/debug-bundles. " +
+                        "Performance keeps only structured events; accuracy also saves the exact OCR crops.",
+                    color = Ink.textSecond, fontSize = Type.label, lineHeight = Type.body,
+                )
+                Spacer(Modifier.height(8.dp))
+                PillRow(
+                    DebugCaptureMode.entries,
+                    s.debugCaptureMode,
+                    { if (it == DebugCaptureMode.ACCURACY) "Accuracy" else "Performance" },
+                ) { store.updateSettings { c -> c.copy(debugCaptureMode = it) } }
+            }
             Spacer(Modifier.height(Metric.pad))
         }
     }

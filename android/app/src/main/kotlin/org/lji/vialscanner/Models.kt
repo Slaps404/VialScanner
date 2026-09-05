@@ -178,6 +178,8 @@ data class ScanRecord(
     /** Filename under the Clips directory, or null when this scan's video was
      *  never recorded or was thrown away. Mirrors Swift's `ScanRecord.clipFile`. */
     var clipFile: String? = null,
+    /** Relative reference to the structured Android debug bundle. */
+    var debugBundle: String? = null,
     /** Set only on a rejected scan where the operator identified the real
      * vial. Null either means the scan wasn't rejected, or it was rejected
      * with the truth unknown - "don't know" has to stay a real answer, not
@@ -321,6 +323,9 @@ data class AppSettings(
      *  runs this app is built for depend on that being a real "never", not a
      *  very long default. */
     var clipRetentionDays: Int = 30,
+    /** Structured scan diagnostics. Accuracy keeps lossless OCR inputs; the
+     *  performance mode keeps only in-memory events until a scan finishes. */
+    var debugCaptureMode: DebugCaptureMode = DebugCaptureMode.PERFORMANCE,
     /** The box currently being worked through. Every vial confirmed while this
      *  is set gets stamped with it, which is the only realistic way the Box
      *  column ever gets filled in: it is 11% populated in the export and nobody
@@ -394,6 +399,10 @@ data class ClipMetadata(
     val barcode: BarcodeMetadata? = null,
     val capture: CaptureMetadata,
     val device: DeviceMetadata,
+    /** Optional link to the richer Android debug bundle. Older sidecars omit
+     *  these fields and remain valid because both values have defaults. */
+    val debugScanID: String? = null,
+    val debugBundle: String? = null,
 )
 
 /** Serializable mirror of `VialCore.ClipExpectation`: the engine's parser stays

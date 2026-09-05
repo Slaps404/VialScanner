@@ -2,6 +2,7 @@ package org.lji.vialscanner
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import java.io.ByteArrayOutputStream
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.common.InputImage
@@ -46,10 +47,27 @@ class MlKitFrame(
      *  from NOT_FOUND into a correct read and cost nothing measurable
      *  (140-154 ms per frame across 576/810/1080/1152, no trend). Going higher
      *  buys nothing: `cropped` never upscales. */
-    private val ocrLongEdge: Int = 1152,
+    private val ocrLongEdge: Int = DEFAULT_OCR_LONG_EDGE,
+    /** The rotation is recorded in the trace; the bitmap has already been
+     *  rotated by `ScanController.uprightBitmap`. */
+    val rotationDegrees: Int = 0,
+    /** Accuracy mode retains a lossless OCR crop for post-scan inspection. */
+    private val captureMode: DebugCaptureMode = DebugCaptureMode.PERFORMANCE,
 ) : VialFrame {
 
-    override val sharpness: Double by lazy { laplacianVariance(bitmap) }
+    val imageSize: DebugImageSize get() = DebugImageSize(bitmap.width, bitmap.height)
+    var sharpnessMs: Long = -1L
+        private set
+    val sharpnessEvaluated: Boolean get() = sharpnessMs >= 0L
+    val sharpnessValue: Double? get() = sharpnessResult
+    private var sharpnessResult: Double? = null
+    override val sharpness: Double by lazy {
+        val t = System.nanoTime()
+        laplacianVariance(bitmap).also {
+            sharpnessMs = (System.nanoTime() - t) / 1_000_000
+            sharpnessResult = it
+        }
+    }
 
     /**
      * Where the recogniser last found text, in the engine's coordinates.
@@ -63,44 +81,97 @@ class MlKitFrame(
     var lastTextBoxes: List<NormRect> = emptyList()
         private set
 
+    var barcodeAttempted: Boolean = false
+        private set
+    var barcodeInputSize: DebugImageSize? = null
+        private set
+    var msBarcode: Long = -1L
+        private set
+    var lastBarcodes: List<BarcodePayload> = emptyList()
+        private set
+
+    var ocrAttempted: Boolean = false
+        private set
+    var ocrInputSize: DebugImageSize? = null
+        private set
+    var msOcr: Long = -1L
+        private set
+    var lastTextObservations: List<TextObservation> = emptyList()
+        private set
+    private var accuracyOcrInput: ByteArray? = null
+
+    fun takeAccuracyOcrInput(): ByteArray? = accuracyOcrInput.also { accuracyOcrInput = null }
+
     override fun detectBarcodes(roi: NormRect?): List<BarcodePayload> {
         // Full resolution: decode rate collapses when a DataMatrix is downscaled.
+        barcodeAttempted = true
         val (crop, _) = cropped(roi, longEdge = 0)
+        barcodeInputSize = DebugImageSize(crop.width, crop.height)
+        val t = System.nanoTime()
         val result = runCatching {
             Tasks.await(scanner.process(InputImage.fromBitmap(crop, 0)))
-        }.getOrNull() ?: return emptyList()
-        return result.mapNotNull { b ->
+        }.getOrNull()
+        msBarcode = (System.nanoTime() - t) / 1_000_000
+        if (result == null) {
+            if (crop !== bitmap && !crop.isRecycled) crop.recycle()
+            return emptyList()
+        }
+        val out = result.mapNotNull { b ->
             val raw = b.rawValue ?: return@mapNotNull null
             if (raw.isEmpty()) null else BarcodePayload(raw, symbologyName(b.format))
         }
+        lastBarcodes = out
+        if (crop !== bitmap && !crop.isRecycled) crop.recycle()
+        return out
     }
 
     override fun recognizeText(roi: NormRect?): List<TextObservation> {
+        ocrAttempted = true
         val (crop, rect) = cropped(roi, longEdge = ocrLongEdge)
-        val result = runCatching {
-            Tasks.await(recognizer.process(InputImage.fromBitmap(crop, 0)))
-        }.getOrNull() ?: return emptyList()
+        ocrInputSize = DebugImageSize(crop.width, crop.height)
+        val t = System.nanoTime()
+        try {
+            val result = runCatching {
+                Tasks.await(recognizer.process(InputImage.fromBitmap(crop, 0)))
+            }.getOrNull()
+            msOcr = (System.nanoTime() - t) / 1_000_000
+            // PNG preserves the exact pixels ML Kit received. Encoding happens
+            // only in accuracy mode; the bundle writer handles the file write,
+            // so performance mode has no observer-effect image work.
+            if (captureMode == DebugCaptureMode.ACCURACY) {
+                accuracyOcrInput = runCatching {
+                    ByteArrayOutputStream().use { out ->
+                        if (!crop.compress(Bitmap.CompressFormat.PNG, 100, out)) return@use null
+                        out.toByteArray()
+                    }
+                }.getOrNull()
+            }
+            if (result == null) return emptyList()
 
-        val out = ArrayList<TextObservation>()
-        for (block in result.textBlocks) for (line in block.lines) {
-            val box = line.boundingBox ?: continue
-            // Two conversions in one place, which is the point of doing it here:
-            // ML Kit reports pixels with the origin top-left, and the engine
-            // (following Vision) wants a fraction of the *full* frame with the
-            // origin bottom-left. Getting the flip wrong does not crash, it
-            // quietly inverts "below", which is what the dangling-keyword pass
-            // in FieldExtraction uses to attach a value to its label.
-            val x = rect.x + box.left.toDouble() / crop.width * rect.w
-            val w = box.width().toDouble() / crop.width * rect.w
-            val h = box.height().toDouble() / crop.height * rect.h
-            val yTop = rect.y + box.top.toDouble() / crop.height * rect.h
-            val minY = 1.0 - (yTop + h)
-            // ML Kit has no per-line confidence; the engine's floor is 0.3 and
-            // a returned line has already cleared the recogniser's own bar.
-            out.add(TextObservation(line.text, 1.0f, NormRect(x, minY, w, h)))
+            val out = ArrayList<TextObservation>()
+            for (block in result.textBlocks) for (line in block.lines) {
+                val box = line.boundingBox ?: continue
+                // Two conversions in one place, which is the point of doing it here:
+                // ML Kit reports pixels with the origin top-left, and the engine
+                // (following Vision) wants a fraction of the *full* frame with the
+                // origin bottom-left. Getting the flip wrong does not crash, it
+                // quietly inverts "below", which is what the dangling-keyword pass
+                // in FieldExtraction uses to attach a value to its label.
+                val x = rect.x + box.left.toDouble() / crop.width * rect.w
+                val w = box.width().toDouble() / crop.width * rect.w
+                val h = box.height().toDouble() / crop.height * rect.h
+                val yTop = rect.y + box.top.toDouble() / crop.height * rect.h
+                val minY = 1.0 - (yTop + h)
+                // ML Kit has no per-line confidence; the engine's floor is 0.3 and
+                // a returned line has already cleared the recogniser's own bar.
+                out.add(TextObservation(line.text, 1.0f, NormRect(x, minY, w, h)))
+            }
+            lastTextObservations = out
+            lastTextBoxes = out.mapNotNull { it.boundingBox }
+            return out
+        } finally {
+            if (crop !== bitmap && !crop.isRecycled) crop.recycle()
         }
-        lastTextBoxes = out.mapNotNull { it.boundingBox }
-        return out
     }
 
     // ---- helpers ----------------------------------------------------------
@@ -137,6 +208,8 @@ class MlKitFrame(
     }
 
     companion object {
+        const val DEFAULT_OCR_LONG_EDGE: Int = 1152
+
         /**
          * Variance of a 3x3 Laplacian over a downsampled gray copy.
          *
