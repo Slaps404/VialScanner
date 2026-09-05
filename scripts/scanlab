@@ -1,0 +1,1270 @@
+#!/usr/bin/env python3
+"""Validate and collect VialScanner debug bundles.
+
+The scanner has several independent failure boundaries.  This command keeps
+the host-side check deliberately boring: JSON and JSONL from the phone go in,
+and a deterministic layer-oriented report comes out.  It only uses Python's
+standard library so it can run on a clean macOS checkout.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import unicodedata
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, Iterator, Mapping, Sequence
+
+
+SCHEMA = "scanlab.bundle"
+SCHEMA_VERSION = 1
+TOOL_VERSION = "1"
+MIN_ROTATION_COVERAGE = 0.85
+DEFAULT_PIXEL_REMOTE = "/sdcard/Android/media/org.lji.vialscanner/debug-bundles"
+
+SUCCESS_VERDICTS = {"certain", "confident"}
+
+FIELD_ALIASES = {
+    "abno": "abNo",
+    "abnumber": "abNo",
+    "ab_number": "abNo",
+    "catalog": "catalog",
+    "catalog#": "catalog",
+    "catalognumber": "catalog",
+    "catalog_number": "catalog",
+    "cat": "catalog",
+    "lot": "lot",
+    "clone": "clone",
+    "vendor": "vendor",
+    "concentration": "concentration",
+    "conc": "concentration",
+    "volume": "volume",
+    "initialvolume": "volume",
+    "size": "volume",
+    "expiry": "expiry",
+    "expiration": "expiry",
+    "expirationdate": "expiry",
+    "storage": "storage",
+    "storagetemperature": "storage",
+    "isotype": "isotype",
+    "target": "target",
+    "host": "host",
+    "barcode": "barcode",
+    "verdict": "verdict",
+}
+
+TEXT_KEYS = {
+    "text",
+    "line",
+    "lines",
+    "rawtext",
+    "recognizedtext",
+    "recognisedtext",
+    "ocrtext",
+    "observation",
+    "observations",
+}
+
+FRAME_EVENTS = {"frame", "image", "sample"}
+RESULT_EVENTS = {"result", "complete", "scan_complete", "scancomplete"}
+STAGE_EVENTS = {"stage", "timing", "metric"}
+
+
+class ScanLabError(Exception):
+    """An expected, user-actionable validation or collection error."""
+
+
+@dataclass
+class Issue:
+    severity: str
+    layer: str
+    code: str
+    message: str
+
+
+@dataclass
+class TraceStats:
+    frame_count: int = 0
+    usable_count: int = 0
+    ocr_count: int = 0
+    ocr_text_count: int = 0
+    barcode_count: int = 0
+    frame_indices: list[int] = field(default_factory=list)
+    raw_text: list[str] = field(default_factory=list)
+    field_values: dict[str, list[str]] = field(default_factory=dict)
+    stage_ms: dict[str, list[float]] = field(default_factory=dict)
+    skip_reasons: dict[str, int] = field(default_factory=dict)
+    frame_events: list[dict[str, Any]] = field(default_factory=list)
+    result_events: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def duration_ms(self) -> float | None:
+        values = [v for values in self.stage_ms.values() for v in values]
+        return sum(values) if values else None
+
+    def all_text(self) -> str:
+        return "\n".join(self.raw_text)
+
+
+@dataclass
+class TapeStats:
+    frame_count: int = 0
+    text_count: int = 0
+    barcode_count: int = 0
+    result: dict[str, Any] | None = None
+
+
+@dataclass
+class BundleReport:
+    path: Path
+    issues: list[Issue] = field(default_factory=list)
+    layers: dict[str, str] = field(default_factory=dict)
+    stats: TraceStats = field(default_factory=TraceStats)
+    tape: TapeStats | None = None
+    summary: dict[str, Any] | None = None
+    expected: dict[str, Any] = field(default_factory=dict)
+    actual: dict[str, Any] = field(default_factory=dict)
+    corrections: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def errors(self) -> list[Issue]:
+        return [i for i in self.issues if i.severity == "error"]
+
+    @property
+    def warnings(self) -> list[Issue]:
+        return [i for i in self.issues if i.severity == "warning"]
+
+
+def issue(report: BundleReport, severity: str, layer: str, code: str, message: str) -> None:
+    report.issues.append(Issue(severity, layer, code, message))
+
+
+def canonical_token(value: Any) -> str:
+    """Fold a key without losing the distinction between words."""
+    if value is None:
+        return ""
+    text = unicodedata.normalize("NFKC", str(value)).strip().casefold()
+    return re.sub(r"[^a-z0-9#]+", "", text)
+
+
+def canonical_field(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    token = canonical_token(raw)
+    return FIELD_ALIASES.get(token, raw if raw else None)
+
+
+def declared_field(value: Any) -> str | None:
+    """Canonicalize only a top-level key that is a known label field."""
+    token = canonical_token(value)
+    return FIELD_ALIASES.get(token)
+
+
+def canonical_verdict(value: Any) -> str | None:
+    if value is None:
+        return None
+    token = canonical_token(value)
+    return {
+        "certain": "certain",
+        "confident": "confident",
+        "ambiguous": "ambiguous",
+        "notfound": "notFound",
+        "newvial": "notFound",
+        "new": "notFound",
+    }.get(token)
+
+
+def is_blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def normalized_value(field_name: str | None, value: Any) -> str | None:
+    if is_blank(value):
+        return None
+    text = unicodedata.normalize("NFKC", str(value)).strip().casefold()
+    if field_name in {"catalog", "abNo", "lot", "clone", "barcode"}:
+        # OCR and human transcriptions commonly disagree only about separators
+        # in identifiers, for example 14-0808-82 versus 14080882.
+        return "".join(c for c in text if c.isalnum()) or None
+    return " ".join(text.split()) or None
+
+
+def display_value(value: Any) -> str:
+    if value is None:
+        return "absent"
+    text = str(value).strip()
+    return text if text else "absent"
+
+
+def as_mapping(value: Any, where: str, report: BundleReport) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        issue(report, "error", "schema", "type", f"{where} must be an object")
+        return None
+    return value
+
+
+def as_nonnegative_int(value: Any, where: str, report: BundleReport) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        issue(report, "error", "schema", "type", f"{where} must be a non-negative integer")
+        return None
+    return value
+
+
+def as_number(value: Any, where: str, report: BundleReport) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        issue(report, "error", "schema", "type", f"{where} must be a number")
+        return None
+    try:
+        result = float(value)
+    except (OverflowError, ValueError):
+        issue(report, "error", "schema", "type", f"{where} must be a finite number")
+        return None
+    if not math.isfinite(result):
+        issue(report, "error", "schema", "type", f"{where} must be a finite number")
+        return None
+    return result
+
+
+def finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
+
+
+def read_json(path: Path, report: BundleReport, where: str) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        issue(report, "error", "schema", "missing", f"missing {where}: {path.name}")
+        return None
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        issue(report, "error", "schema", "json", f"could not read {where}: {exc}")
+        return None
+    if not isinstance(data, dict):
+        issue(report, "error", "schema", "type", f"{where} must contain a JSON object")
+        return None
+    return data
+
+
+def safe_artifact_path(bundle: Path, value: Any, report: BundleReport, name: str) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        issue(report, "error", "schema", "artifact-path", f"summary.artifacts.{name} must be a relative path")
+        return None
+    raw = value.strip()
+    if Path(raw).is_absolute():
+        issue(report, "error", "schema", "artifact-path", f"summary.artifacts.{name} must be a relative path")
+        return None
+    candidate = (bundle / raw).resolve()
+    try:
+        candidate.relative_to(bundle.resolve())
+    except ValueError:
+        issue(report, "error", "schema", "artifact-path", f"artifact {name} escapes the bundle: {value!r}")
+        return None
+    if not candidate.exists():
+        issue(report, "error", "schema", "missing-artifact", f"missing {name} artifact: {value}")
+        return None
+    return candidate
+
+
+def scalar_strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        if value.strip():
+            yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from scalar_strings(item)
+
+
+def collect_text(value: Any, key: str | None = None) -> list[str]:
+    """Collect recognizer text only from text-shaped keys.
+
+    We intentionally do not collect every string in a trace. Reasons and
+    device names are not OCR evidence and would make layer routing misleading.
+    """
+    out: list[str] = []
+    key_token = canonical_token(key) if key is not None else ""
+    if key_token in TEXT_KEYS:
+        out.extend(scalar_strings(value))
+        return out
+    if isinstance(value, dict):
+        for k, child in value.items():
+            out.extend(collect_text(child, str(k)))
+    elif isinstance(value, list):
+        for child in value:
+            out.extend(collect_text(child, key))
+    return out
+
+
+def collect_field_maps(value: Any, key: str | None = None) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    if isinstance(value, dict):
+        key_token = canonical_token(key) if key is not None else ""
+        field_container = key_token in {"fields", "extracted", "extractedfields", "fieldvalues"}
+        for raw_key, child in value.items():
+            field = canonical_field(raw_key) if field_container or canonical_field(raw_key) in FIELD_ALIASES.values() else None
+            if field is not None and isinstance(child, (str, int, float)) and not isinstance(child, bool):
+                text = str(child).strip()
+                if text:
+                    out.setdefault(field, []).append(text)
+            nested = collect_field_maps(child, str(raw_key))
+            for name, values in nested.items():
+                out.setdefault(name, []).extend(values)
+    elif isinstance(value, list):
+        for child in value:
+            nested = collect_field_maps(child, key)
+            for name, values in nested.items():
+                out.setdefault(name, []).extend(values)
+    return out
+
+
+def find_bool(value: Any, keys: set[str]) -> bool | None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if canonical_token(key) in keys and isinstance(child, bool):
+                return child
+        for child in value.values():
+            found = find_bool(child, keys)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_bool(child, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def find_number(value: Any, keys: set[str]) -> float | None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if canonical_token(key) in keys and finite_number(child):
+                return float(child)
+        for child in value.values():
+            found = find_number(child, keys)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_number(child, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def find_string(value: Any, keys: set[str]) -> str | None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if canonical_token(key) in keys and isinstance(child, str) and child.strip():
+                return child.strip()
+        for child in value.values():
+            found = find_string(child, keys)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_string(child, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def append_stage_duration(stats: TraceStats, name: str, value: Any) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return
+    stage = canonical_token(name) or "unknown"
+    stats.stage_ms.setdefault(stage, []).append(float(value))
+
+
+def parse_frame(event: dict[str, Any], stats: TraceStats, report: BundleReport, line_number: int) -> None:
+    index = event.get("index", event.get("frameIndex", event.get("frame")))
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        issue(report, "error", "schema", "frame-index", f"trace line {line_number}: frame index must be a non-negative integer")
+    else:
+        stats.frame_indices.append(index)
+    timestamp = event.get("timestamp", event.get("time"))
+    if not finite_number(timestamp):
+        issue(report, "error", "schema", "frame-time", f"trace line {line_number}: frame timestamp must be numeric")
+
+    usable = find_bool(event, {"usable", "accepted", "ocreligible", "ocraccepted"})
+    if usable is None:
+        issue(report, "error", "schema", "frame-usable", f"trace line {line_number}: frame needs usable/accepted boolean")
+        usable = False
+    stats.frame_count += 1
+    if usable:
+        stats.usable_count += 1
+
+    ocr_ran = find_bool(event, {"ocrran", "ocrattempted", "recognized", "recognised"})
+    ocr = event.get("ocr")
+    if ocr_ran is None and isinstance(ocr, dict):
+        ocr_ran = find_bool(ocr, {"ran", "attempted", "recognized", "recognised"})
+    if ocr_ran:
+        stats.ocr_count += 1
+
+    texts = collect_text(event)
+    if texts:
+        stats.ocr_text_count += len(texts)
+        stats.raw_text.extend(texts)
+    fields = collect_field_maps(event)
+    for name, values in fields.items():
+        stats.field_values.setdefault(name, []).extend(values)
+
+    barcode = event.get("barcode", event.get("barcodes"))
+    if barcode not in (None, [], {}):
+        stats.barcode_count += len(barcode) if isinstance(barcode, list) else 1
+
+    skip = find_string(event, {"skipreason", "skip", "reason"})
+    if skip and not usable:
+        stats.skip_reasons[skip] = stats.skip_reasons.get(skip, 0) + 1
+
+    def walk_durations(value: Any, hint: str = "frame") -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                token = canonical_token(key)
+                if token in {"durationms", "elapsedms", "timems", "processingms"}:
+                    append_stage_duration(stats, hint, child)
+                else:
+                    walk_durations(child, token or hint)
+        elif isinstance(value, list):
+            for child in value:
+                walk_durations(child, hint)
+
+    walk_durations(event)
+    stats.frame_events.append(event)
+
+
+def parse_trace(path: Path, report: BundleReport) -> TraceStats:
+    stats = TraceStats()
+    try:
+        handle = path.open("r", encoding="utf-8")
+    except OSError as exc:
+        issue(report, "error", "schema", "trace-read", f"could not read trace: {exc}")
+        return stats
+    with handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                issue(report, "error", "schema", "trace-json", f"trace line {line_number} is not JSON: {exc.msg}")
+                continue
+            if not isinstance(event, dict):
+                issue(report, "error", "schema", "trace-type", f"trace line {line_number} must be a JSON object")
+                continue
+            raw_type = event.get("event", event.get("type"))
+            if not isinstance(raw_type, str) or not raw_type.strip():
+                issue(report, "error", "schema", "trace-event", f"trace line {line_number} needs event/type")
+                continue
+            event_type = canonical_token(raw_type)
+            if event_type in {canonical_token(x) for x in FRAME_EVENTS}:
+                parse_frame(event, stats, report, line_number)
+            elif event_type in {canonical_token(x) for x in RESULT_EVENTS}:
+                stats.result_events.append(event)
+            elif event_type in {canonical_token(x) for x in STAGE_EVENTS}:
+                stage = find_string(event, {"stage", "name"}) or "unknown"
+                duration = find_number(event, {"durationms", "elapsedms", "timems", "processingms"})
+                if duration is None:
+                    issue(report, "warning", "performance", "stage-duration", f"trace line {line_number}: stage has no durationMs")
+                else:
+                    append_stage_duration(stats, stage, duration)
+            else:
+                issue(report, "warning", "schema", "unknown-event", f"trace line {line_number}: ignoring unknown event {raw_type!r}")
+    if len(set(stats.frame_indices)) != len(stats.frame_indices):
+        issue(report, "error", "schema", "frame-index-duplicate", "trace frame indices must be unique")
+    if stats.frame_indices != sorted(stats.frame_indices):
+        issue(report, "error", "schema", "frame-index-order", "trace frame indices must be in ascending order")
+    if stats.frame_count == 0:
+        issue(report, "error", "schema", "no-frames", "trace.jsonl contains no frame events")
+    return stats
+
+
+def unescape_tape(value: str) -> str:
+    return value.replace("\\t", "\t").replace("\\n", "\n").replace("\\\\", "\\")
+
+
+def parse_tape(path: Path, report: BundleReport) -> TapeStats:
+    stats = TapeStats()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        issue(report, "error", "schema", "tape-read", f"could not read observations tape: {exc}")
+        return stats
+    for line_number, line in enumerate(lines, 1):
+        if not line:
+            continue
+        parts = line.split("\t")
+        tag = parts[0]
+        if tag == "F":
+            if len(parts) != 1:
+                issue(report, "error", "schema", "tape-frame", f"tape line {line_number}: F takes no fields")
+            stats.frame_count += 1
+        elif tag == "T":
+            if len(parts) < 7:
+                issue(report, "error", "schema", "tape-text", f"tape line {line_number}: T needs confidence, box, and text")
+                continue
+            try:
+                for value in parts[1:6]:
+                    float(value)
+            except ValueError:
+                issue(report, "error", "schema", "tape-text", f"tape line {line_number}: T numeric fields are invalid")
+            stats.text_count += 1
+        elif tag == "B":
+            if len(parts) != 3:
+                issue(report, "error", "schema", "tape-barcode", f"tape line {line_number}: B needs symbology and raw")
+            else:
+                stats.barcode_count += 1
+        elif tag == "R":
+            if stats.result is not None:
+                issue(report, "error", "schema", "tape-result", f"tape line {line_number}: observations tape has more than one R result record")
+                continue
+            if len(parts) < 9:
+                issue(report, "error", "schema", "tape-result", f"tape line {line_number}: R is truncated")
+                continue
+            verdict = canonical_verdict(parts[1])
+            if verdict is None:
+                issue(report, "error", "schema", "tape-verdict", f"tape line {line_number}: R verdict is invalid")
+            stats.result = {
+                "verdict": verdict or parts[1],
+                "standard": parts[2],
+                "catalog": unescape_tape(parts[3]) or None,
+                "abNo": unescape_tape(parts[4]) or None,
+                "lotNotOnRecord": parts[5].casefold() == "true",
+                "evidenceLevel": parts[6],
+                "score": parts[7],
+                "margin": parts[8],
+            }
+        else:
+            issue(report, "error", "schema", "tape-tag", f"tape line {line_number}: unknown tag {tag!r}")
+    if stats.frame_count == 0 and stats.barcode_count == 0:
+        issue(report, "error", "schema", "tape-empty", "observations tape has no F or B evidence")
+    if stats.result is None:
+        issue(report, "error", "schema", "tape-result", "observations tape has no R result record")
+    return stats
+
+
+def merge_fields(record: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(record, Mapping):
+        return {}
+    out: dict[str, Any] = {}
+    fields = record.get("fields")
+    if isinstance(fields, Mapping):
+        for key, value in fields.items():
+            field_name = canonical_field(key)
+            if field_name:
+                out[field_name] = value
+    for key, value in record.items():
+        field_name = canonical_field(key)
+        if field_name and field_name != "verdict" and not isinstance(value, (dict, list)):
+            out[field_name] = value
+    barcode = record.get("barcode")
+    if isinstance(barcode, Mapping):
+        for key, value in barcode.items():
+            field_name = canonical_field(key)
+            if field_name and field_name not in out and not isinstance(value, (dict, list)):
+                out[field_name] = value
+        if "raw" in barcode and "barcode" not in out:
+            out["barcode"] = barcode["raw"]
+    return out
+
+
+def correction_records(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return review corrections in either list or field-keyed wire shape.
+
+    The phone UI can naturally emit a list, while a hand-edited fixture is
+    easier to read as ``{"lot": { ... }}``.  Accept both without making the
+    validator guess from arbitrary nested strings.
+    """
+    candidates: list[Any] = []
+    for container in (summary, summary.get("actual"), summary.get("feedback"), summary.get("review")):
+        if not isinstance(container, Mapping):
+            continue
+        for key in ("corrections", "correction", "reviewCorrections", "review_corrections"):
+            if key in container:
+                candidates.append(container[key])
+    out: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            out.extend(item for item in candidate if isinstance(item, Mapping))
+        elif isinstance(candidate, Mapping):
+            # A single correction object has a field/name key.  Otherwise the
+            # mapping is interpreted as field name -> correction object.
+            if any(key in candidate for key in (
+                "field", "name", "key", "original", "originalValue", "machine", "machineValue",
+                "final", "finalValue", "saved", "savedValue", "after", "corrected",
+            )):
+                out.append(dict(candidate))
+            else:
+                for field_name, value in candidate.items():
+                    if isinstance(value, Mapping):
+                        item = dict(value)
+                        item.setdefault("field", field_name)
+                        out.append(item)
+    return out
+
+
+def correction_value(record: Mapping[str, Any], keys: Sequence[str]) -> tuple[bool, Any]:
+    for key in keys:
+        if key in record:
+            return True, record[key]
+    return False, None
+
+
+def validate_corrections(report: BundleReport) -> None:
+    if not report.summary:
+        return
+    machine_fields = merge_fields(report.actual)
+    for number, raw in enumerate(correction_records(report.summary), 1):
+        field_name = canonical_field(raw.get("field", raw.get("name", raw.get("key"))))
+        has_original, original = correction_value(raw, ("original", "originalValue", "machine", "machineValue", "before", "read"))
+        has_final, final = correction_value(raw, ("final", "finalValue", "saved", "savedValue", "after", "corrected"))
+        provenance = raw.get("provenance", raw.get("source"))
+        visible = raw.get("visibleOnLabel", raw.get("visible_on_label", raw.get("onLabel", raw.get("visible"))))
+        reason = raw.get("reviewReason", raw.get("review_reason", raw.get("reason")))
+        if not field_name:
+            issue(report, "error", "schema", "correction-field", f"correction {number} needs a field")
+            continue
+        if not has_original:
+            issue(report, "error", "schema", "correction-original", f"correction {number} ({field_name}) needs original machine value")
+        if not has_final:
+            issue(report, "error", "schema", "correction-final", f"correction {number} ({field_name}) needs final saved value")
+        if not isinstance(provenance, str) or not provenance.strip():
+            issue(report, "error", "schema", "correction-provenance", f"correction {number} ({field_name}) needs provenance/source")
+        if not isinstance(visible, bool):
+            issue(report, "error", "schema", "correction-visible", f"correction {number} ({field_name}) needs visibleOnLabel boolean")
+        if not isinstance(reason, str) or not reason.strip():
+            issue(report, "error", "schema", "correction-reason", f"correction {number} ({field_name}) needs review reason")
+        report.corrections.append({
+            "field": field_name,
+            "original": original,
+            "final": final,
+            "provenance": provenance,
+            "visibleOnLabel": visible,
+            "reason": reason,
+        })
+        if has_original:
+            machine = machine_fields.get(field_name)
+            if normalized_value(field_name, original) != normalized_value(field_name, machine):
+                issue(report, "error", "integrity", "correction-original", f"correction {number} ({field_name}) original {display_value(original)!r} does not match summary.actual {display_value(machine)!r}")
+    seen: set[str] = set()
+    for record in report.corrections:
+        name = str(record["field"])
+        if name in seen:
+            issue(report, "warning", "feedback", "duplicate-correction", f"multiple corrections recorded for {name}; the first one is used")
+        seen.add(name)
+
+
+def expected_fields(truth: Mapping[str, Any], report: BundleReport) -> tuple[str, list[str]]:
+    raw_mode = truth.get("mode", truth.get("kind"))
+    mode = canonical_token(raw_mode)
+    mode = {
+        "identify": "known_vial",
+        "known": "known_vial",
+        "knownvial": "known_vial",
+        "knownantibody": "known_antibody",
+        "catalogue": "new_vial",
+        "catalog": "new_vial",
+        "new": "new_vial",
+        "newvial": "new_vial",
+    }.get(mode, raw_mode if isinstance(raw_mode, str) else "")
+    if mode not in {"known_vial", "known_antibody", "new_vial"}:
+        issue(report, "error", "schema", "ground-truth-mode", "groundTruth.mode must be known_vial, known_antibody, or new_vial")
+        return "", []
+
+    values: dict[str, Any] = {}
+    declared = truth.get("fields")
+    if declared is not None and not isinstance(declared, Mapping):
+        issue(report, "error", "schema", "ground-truth-fields", "groundTruth.fields must be an object")
+    elif isinstance(declared, Mapping):
+        for key, value in declared.items():
+            name = canonical_field(key)
+            if name and name != "verdict":
+                values[name] = value
+    for key, value in truth.items():
+        name = declared_field(key)
+        if name and name not in values and name != "verdict":
+            values[name] = value
+
+    required_raw = truth.get("requiredFields")
+    if required_raw is None:
+        required = list(values.keys())
+    elif isinstance(required_raw, list):
+        required = []
+        for item in required_raw:
+            if not isinstance(item, str):
+                issue(report, "error", "schema", "required-field", "groundTruth.requiredFields entries must be strings")
+                continue
+            name = canonical_field(item)
+            if not name:
+                issue(report, "error", "schema", "required-field", "groundTruth.requiredFields contains an empty field")
+            elif name not in required:
+                required.append(name)
+    else:
+        issue(report, "error", "schema", "required-fields-type", "groundTruth.requiredFields must be an array")
+        required = []
+
+    identity = ("abNo", "catalog")
+    if mode in {"known_vial", "known_antibody"} and not any(normalized_value(name, values[name]) for name in identity if name in values):
+        issue(report, "error", "ground-truth", "identity-missing", "known ground truth needs abNo or catalog")
+    if mode in {"known_vial", "known_antibody"}:
+        for name in identity:
+            if name in values and name not in required:
+                required.append(name)
+    if mode == "new_vial" and not required:
+        issue(report, "error", "ground-truth", "fields-missing", "new_vial ground truth needs fields and requiredFields")
+    for name in required:
+        if name not in values:
+            issue(report, "error", "ground-truth", "field-missing", f"groundTruth.requiredFields names {name!r}, but groundTruth.fields does not define it")
+        elif isinstance(values[name], str) and not values[name].strip():
+            issue(report, "error", "ground-truth", "field-blank", f"groundTruth field {name!r} is blank; use null only for an explicitly absent label field")
+    if truth.get("verdict") is not None and canonical_verdict(truth.get("verdict")) is None:
+        issue(report, "error", "ground-truth", "verdict-invalid", "groundTruth.verdict must be certain, confident, ambiguous, or notFound")
+    return mode, required
+
+
+def value_for(record: Mapping[str, Any], field_name: str) -> Any:
+    fields = merge_fields(record)
+    return fields.get(field_name)
+
+
+def trace_contains(stats: TraceStats, field_name: str, expected: Any) -> bool:
+    target = normalized_value(field_name, expected)
+    if target is None:
+        return False
+    for value in stats.field_values.get(field_name, []):
+        if normalized_value(field_name, value) == target:
+            return True
+    for text in stats.raw_text:
+        normalized = normalized_value(field_name, text)
+        if normalized is not None and target in normalized:
+            return True
+    return False
+
+
+def route_field(report: BundleReport, field_name: str, expected: Any, actual: Any) -> str:
+    stats = report.stats
+    if stats.frame_count == 0 or stats.usable_count == 0:
+        return "capture"
+    if stats.ocr_count == 0 and stats.barcode_count == 0:
+        return "recognizer"
+    if trace_contains(stats, field_name, expected):
+        return "extraction"
+    if field_name in stats.field_values:
+        return "extraction"
+    if is_blank(actual):
+        return "recognizer"
+    return "matching"
+
+
+def compare_tape_to_actual(report: BundleReport) -> None:
+    if report.tape is None or report.tape.result is None:
+        return
+    tape = report.tape.result
+    actual = report.actual
+    for name in ("verdict", "catalog", "abNo"):
+        tape_value = tape.get(name)
+        actual_value = canonical_verdict(actual.get("verdict")) if name == "verdict" else value_for(actual, name)
+        if normalized_value(name, tape_value) != normalized_value(name, actual_value):
+            issue(report, "error", "integrity", "tape-summary", f"tape {name} {display_value(tape_value)!r} disagrees with summary.actual {display_value(actual_value)!r}")
+
+
+def validate_summary(report: BundleReport) -> tuple[dict[str, Any] | None, list[Path]]:
+    summary_path = report.path / "summary.json"
+    summary = read_json(summary_path, report, "summary.json")
+    if summary is None:
+        report.layers["schema"] = "FAIL"
+        return None, []
+    report.summary = summary
+    if summary.get("schema") != SCHEMA:
+        issue(report, "error", "schema", "schema-name", f"summary.schema must be {SCHEMA!r}")
+    if (
+        isinstance(summary.get("schemaVersion"), bool)
+        or not isinstance(summary.get("schemaVersion"), int)
+        or summary.get("schemaVersion") != SCHEMA_VERSION
+    ):
+        issue(report, "error", "schema", "schema-version", f"summary.schemaVersion must be {SCHEMA_VERSION}")
+    for key in ("bundleId", "createdAt", "platform", "goal"):
+        if not isinstance(summary.get(key), str) or not summary[key].strip():
+            issue(report, "error", "schema", "required", f"summary.{key} is required")
+
+    truth = as_mapping(summary.get("groundTruth"), "summary.groundTruth", report)
+    actual = as_mapping(summary.get("actual"), "summary.actual", report)
+    capture = as_mapping(summary.get("capture"), "summary.capture", report)
+    artifacts = as_mapping(summary.get("artifacts"), "summary.artifacts", report)
+    if truth is not None:
+        mode, required = expected_fields(truth, report)
+        report.expected = {"mode": mode, "requiredFields": required, "record": truth}
+    if actual is not None:
+        report.actual = actual
+        if "fields" in actual and not isinstance(actual["fields"], Mapping):
+            issue(report, "error", "schema", "actual-fields", "summary.actual.fields must be an object")
+        verdict = canonical_verdict(actual.get("verdict"))
+        if verdict is None:
+            issue(report, "error", "schema", "actual-verdict", "summary.actual.verdict must be certain, confident, ambiguous, or notFound")
+        else:
+            report.actual["verdict"] = verdict
+    if capture is not None:
+        counters = {
+            "framesSeen": ("framesSeen", "frames"),
+            "usableFrames": ("usableFrames", "usable", "acceptedFrames"),
+            "ocrFrames": ("ocrFrames", "ocrFramesUsed"),
+        }
+        for label, keys in counters.items():
+            value = next((capture[k] for k in keys if k in capture), None)
+            if value is None:
+                issue(report, "error", "schema", "capture-counter", f"summary.capture.{label} is required")
+            else:
+                as_nonnegative_int(value, f"summary.capture.{label}", report)
+        rotation = capture.get("rotation")
+        if not isinstance(rotation, Mapping):
+            issue(report, "error", "schema", "rotation", "summary.capture.rotation must include required and coverage")
+        else:
+            if not isinstance(rotation.get("required"), bool):
+                issue(report, "error", "schema", "rotation-required", "summary.capture.rotation.required must be boolean")
+            coverage = rotation.get("coverage", rotation.get("coverageFraction"))
+            if not finite_number(coverage) or not 0 <= float(coverage) <= 1:
+                issue(report, "error", "schema", "rotation-coverage", "summary.capture.rotation.coverage must be a number from 0 to 1")
+            elif report.expected.get("mode") == "new_vial":
+                if rotation.get("required") is not True:
+                    issue(report, "error", "capture", "rotation-required", "catalogue scans must declare summary.capture.rotation.required=true")
+                if float(coverage) < MIN_ROTATION_COVERAGE:
+                    issue(report, "error", "capture", "incomplete-rotation", f"catalogue scan covered {float(coverage):.0%} of the rotation, below {MIN_ROTATION_COVERAGE:.0%}")
+        thermal = capture.get("thermal")
+        if thermal is None:
+            issue(report, "warning", "capture", "thermal-missing", "capture.thermal is missing; timing cannot be trusted")
+        for key in ("durationMs", "elapsedMs"):
+            if key in capture and not finite_number(capture[key]):
+                issue(report, "error", "schema", "capture-duration", f"summary.capture.{key} must be a finite number")
+    if artifacts is None:
+        return summary, []
+    trace_value = artifacts.get("trace")
+    if trace_value is None:
+        issue(report, "error", "schema", "trace-required", "summary.artifacts.trace is required")
+        return summary, []
+    trace = safe_artifact_path(report.path, trace_value, report, "trace")
+    paths = [trace] if trace is not None else []
+    artifact_paths = {"trace": trace} if trace is not None else {}
+    for name in ("observations", "images", "video"):
+        if name in artifacts:
+            candidate = safe_artifact_path(report.path, artifacts[name], report, name)
+            if candidate is not None:
+                artifact_paths[name] = candidate
+                paths.append(candidate)
+    if trace is not None:
+        if not trace.is_file():
+            issue(report, "error", "schema", "artifact-type", "trace artifact must be a file")
+        else:
+            report.stats = parse_trace(trace, report)
+    if "observations" in artifacts:
+        tape_path = artifact_paths.get("observations")
+        if tape_path is not None:
+            if not tape_path.is_file():
+                issue(report, "error", "schema", "artifact-type", "observations artifact must be a file")
+            else:
+                report.tape = parse_tape(tape_path, report)
+    return summary, paths
+
+
+def validate_counts(report: BundleReport) -> None:
+    capture = report.summary.get("capture") if report.summary else None
+    if not isinstance(capture, Mapping):
+        return
+    expected_counts = {
+        "framesSeen": report.stats.frame_count,
+        "usableFrames": report.stats.usable_count,
+        "ocrFrames": report.stats.ocr_count,
+    }
+    aliases = {
+        "framesSeen": ("framesSeen", "frames"),
+        "usableFrames": ("usableFrames", "usable", "acceptedFrames"),
+        "ocrFrames": ("ocrFrames", "ocrFramesUsed"),
+    }
+    for name, observed in expected_counts.items():
+        for key in aliases[name]:
+            summary_value = capture.get(key)
+            if isinstance(summary_value, int) and not isinstance(summary_value, bool) and summary_value != observed:
+                issue(report, "error", "integrity", "trace-count", f"summary.capture.{key}={summary_value} but trace contains {observed}")
+
+
+def compare_ground_truth(report: BundleReport) -> None:
+    truth_record = report.expected.get("record")
+    if not isinstance(truth_record, Mapping):
+        return
+    actual = report.actual
+    mode = report.expected.get("mode")
+    required = report.expected.get("requiredFields", [])
+    truth_fields: dict[str, Any] = {}
+    declared = truth_record.get("fields")
+    if isinstance(declared, Mapping):
+        for key, value in declared.items():
+            name = canonical_field(key)
+            if name:
+                truth_fields[name] = value
+    for key, value in truth_record.items():
+        name = declared_field(key)
+        if name and name != "verdict" and name not in truth_fields:
+            truth_fields[name] = value
+    actual_fields = merge_fields(actual)
+    corrections: dict[str, dict[str, Any]] = {}
+    for record in report.corrections:
+        # A duplicate is retained for the warning, but the first review
+        # decision is the authoritative one.
+        corrections.setdefault(record["field"], record)
+    for field_name in required:
+        expected_value = truth_fields.get(field_name)
+        actual_value = actual_fields.get(field_name)
+        expected_normalized = normalized_value(field_name, expected_value)
+        actual_normalized = normalized_value(field_name, actual_value)
+        correction = corrections.get(field_name)
+        if expected_normalized == actual_normalized:
+            continue
+        if correction is not None:
+            final = correction.get("final")
+            visible = correction.get("visibleOnLabel") is True
+            if normalized_value(field_name, final) == expected_normalized:
+                if visible:
+                    # A human supplied the right value, but it was present on
+                    # the label. That is a scanner miss even though the saved
+                    # record is now correct.
+                    layer = route_field(report, field_name, expected_value, actual_value)
+                    issue(report, "error", layer, "scanner-miss", f"{field_name}: scanner miss, machine {display_value(actual_value)!r} was corrected to {display_value(final)!r}; label was marked visible")
+                else:
+                    # A correction based on inventory knowledge or another
+                    # non-label source is useful feedback, but it is not an OCR
+                    # failure. Keep the run green and make the distinction
+                    # visible in the report.
+                    issue(report, "info", "feedback", "manual-correction", f"{field_name}: saved as {display_value(final)!r} from {correction.get('provenance', 'manual')}; not counted as scanner miss")
+                continue
+        layer = route_field(report, field_name, expected_value, actual_value)
+        issue(report, "error", layer, "field-mismatch", f"{field_name}: expected {display_value(expected_value)!r}, got {display_value(actual_value)!r}")
+
+    expected_verdict = truth_record.get("verdict")
+    if expected_verdict is not None:
+        expected_verdict = canonical_verdict(expected_verdict) or str(expected_verdict)
+        actual_verdict = canonical_verdict(actual.get("verdict"))
+        if expected_verdict != actual_verdict:
+            issue(report, "error", "matching", "verdict-mismatch", f"verdict: expected {expected_verdict!r}, got {actual_verdict or display_value(actual.get('verdict'))!r}")
+    elif mode in {"known_vial", "known_antibody"}:
+        actual_verdict = canonical_verdict(actual.get("verdict"))
+        if actual_verdict not in SUCCESS_VERDICTS:
+            issue(report, "error", "matching", "known-not-resolved", f"known ground truth ended as {actual_verdict or 'invalid'}, not a resolved verdict")
+    elif mode == "new_vial":
+        actual_verdict = canonical_verdict(actual.get("verdict"))
+        if actual_verdict in SUCCESS_VERDICTS:
+            issue(report, "error", "matching", "false-positive", f"new_vial ground truth ended as {actual_verdict}, a confident catalog match")
+
+
+def validate_artifacts(report: BundleReport, paths: Sequence[Path]) -> None:
+    summary = report.summary or {}
+    capture = summary.get("capture") if isinstance(summary, Mapping) else None
+    artifacts = summary.get("artifacts") if isinstance(summary, Mapping) else None
+    if not isinstance(capture, Mapping) or not isinstance(artifacts, Mapping):
+        return
+    mode = canonical_token(capture.get("mode"))
+    image_path = None
+    if "images" in artifacts:
+        image_value = artifacts["images"]
+        if isinstance(image_value, str) and not Path(image_value).is_absolute():
+            image_path = next(
+                (p for p in paths if p == (report.path / image_value.strip()).resolve()),
+                None,
+            )
+        if image_path is not None and image_path.is_dir():
+            extensions = {".jpg", ".jpeg", ".png", ".heic", ".webp"}
+            image_count = sum(1 for p in image_path.rglob("*") if p.is_file() and p.suffix.casefold() in extensions)
+            if image_count == 0:
+                issue(report, "warning", "capture", "images-empty", "images artifact exists but contains no recognized image files")
+            usable = capture.get("usableFrames", capture.get("usable"))
+            if mode == "accuracy" and isinstance(usable, int) and image_count < usable:
+                issue(report, "error", "capture", "images-incomplete", f"accuracy bundle saved {image_count} images for {usable} usable frames")
+        elif image_path is not None and image_path.is_file():
+            issue(report, "error", "capture", "images-file", "images artifact should be a directory")
+        elif image_path is None and mode == "accuracy":
+            # safe_artifact_path reports missing or unsafe paths. This message
+            # covers an otherwise valid path that could not be resolved into
+            # the artifact list.
+            issue(report, "error", "schema", "images-path", "accuracy images artifact could not be resolved")
+    elif mode == "accuracy":
+        issue(report, "error", "schema", "images-required", "accuracy capture mode requires summary.artifacts.images")
+    if mode == "performance" and "images" in artifacts:
+        issue(report, "warning", "capture", "performance-images", "performance mode includes image artifacts; disk I/O may contaminate timing")
+
+
+def assign_layers(report: BundleReport) -> None:
+    by_layer: dict[str, list[Issue]] = {}
+    for item in report.issues:
+        by_layer.setdefault(item.layer, []).append(item)
+    ordered = [
+        "schema", "ground-truth", "capture", "recognizer", "extraction",
+        "matching", "feedback", "integrity", "performance",
+    ]
+    for layer in ordered:
+        items = by_layer.get(layer, [])
+        if any(i.severity == "error" for i in items):
+            report.layers[layer] = "FAIL"
+        elif any(i.severity == "warning" for i in items):
+            report.layers[layer] = "WARN"
+        else:
+            report.layers[layer] = "OK"
+
+
+def validate_bundle(path: Path) -> BundleReport:
+    report = BundleReport(path=path)
+    if not path.exists() or not path.is_dir():
+        issue(report, "error", "schema", "bundle-path", f"bundle directory does not exist: {path}")
+        assign_layers(report)
+        return report
+    _, artifact_paths = validate_summary(report)
+    if report.summary is not None:
+        if report.stats.frame_count > 0 and report.stats.usable_count == 0:
+            issue(report, "error", "capture", "no-usable-frames", "trace contains no usable frames")
+        validate_corrections(report)
+        validate_counts(report)
+        compare_ground_truth(report)
+        compare_tape_to_actual(report)
+        validate_artifacts(report, artifact_paths)
+    assign_layers(report)
+    return report
+
+
+def format_duration(value: Any) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{float(value):.0f} ms"
+    return "n/a"
+
+
+def render_report(report: BundleReport) -> str:
+    summary = report.summary or {}
+    capture = summary.get("capture") if isinstance(summary, Mapping) else {}
+    if not isinstance(capture, Mapping):
+        capture = {}
+    actual = report.actual
+    verdict = canonical_verdict(actual.get("verdict")) or display_value(actual.get("verdict"))
+    lines = [
+        f"ScanLab {'PASS' if not report.errors else 'FAIL'}: {report.path}",
+        f"  bundle: {summary.get('bundleId', 'unknown')}  platform: {summary.get('platform', 'unknown')}  goal: {summary.get('goal', 'unknown')}",
+        f"  actual: {verdict}  catalog={display_value(value_for(actual, 'catalog'))}  abNo={display_value(value_for(actual, 'abNo'))}  lot={display_value(value_for(actual, 'lot'))}",
+        "",
+        "Layers:",
+    ]
+    layer_labels = {
+        "schema": "schema",
+        "ground-truth": "ground-truth",
+        "capture": "capture",
+        "recognizer": "recognizer",
+        "extraction": "extraction",
+        "matching": "matching",
+        "feedback": "feedback",
+        "integrity": "integrity",
+        "performance": "performance",
+    }
+    for layer, label in layer_labels.items():
+        lines.append(f"  {label:12} {report.layers.get(layer, 'OK')}")
+    rotation = capture.get("rotation") if isinstance(capture.get("rotation"), Mapping) else {}
+    coverage = None
+    if isinstance(rotation, Mapping):
+        coverage = rotation.get("coverage", rotation.get("coverageFraction"))
+    duration = capture.get("durationMs", capture.get("elapsedMs"))
+    thermal = capture.get("thermal")
+    if isinstance(thermal, Mapping):
+        thermal = f"start={display_value(thermal.get('start'))}, end={display_value(thermal.get('end'))}"
+    lines.extend([
+        "",
+        "Evidence:",
+        f"  frames {report.stats.frame_count} ({report.stats.usable_count} usable), OCR {report.stats.ocr_count} passes, text lines {report.stats.ocr_text_count}, barcodes {report.stats.barcode_count}",
+        f"  rotation {float(coverage):.0%}" if isinstance(coverage, (int, float)) else "  rotation n/a",
+        f"  duration {format_duration(duration)}, thermal {display_value(thermal)}",
+    ])
+    if report.stats.skip_reasons:
+        reasons = ", ".join(f"{name}={count}" for name, count in sorted(report.stats.skip_reasons.items()))
+        lines.append(f"  skipped: {reasons}")
+    findings = [item for item in report.issues if item.severity in {"error", "warning", "info"}]
+    if findings:
+        lines.extend(["", "Findings:"])
+        for item in findings:
+            prefix = {"error": "ERROR", "warning": "WARN", "info": "INFO"}.get(item.severity, item.severity.upper())
+            lines.append(f"  {prefix} [{item.layer}] {item.message}")
+    if not report.errors:
+        lines.extend(["", "Next: bundle is structurally valid; inspect any WARN lines before trusting timing or accuracy."])
+    return "\n".join(lines)
+
+
+def report_json(report: BundleReport) -> dict[str, Any]:
+    summary = report.summary or {}
+    return {
+        "ok": not report.errors,
+        "path": str(report.path),
+        "layers": report.layers,
+        "stats": {
+            "frames": report.stats.frame_count,
+            "usableFrames": report.stats.usable_count,
+            "ocrFrames": report.stats.ocr_count,
+            "ocrTextLines": report.stats.ocr_text_count,
+            "barcodes": report.stats.barcode_count,
+        },
+        "summary": summary,
+        "corrections": report.corrections,
+        "issues": [item.__dict__ for item in report.issues],
+    }
+
+
+def run_checked(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def select_adb_device(adb: str, serial: str | None) -> str:
+    command = [adb, "devices", "-l"]
+    result = run_checked(command)
+    if result.returncode != 0:
+        raise ScanLabError(f"adb devices failed: {result.stderr.strip() or result.stdout.strip()}")
+    rows: list[tuple[str, str]] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("List of devices"):
+            continue
+        fields = line.split()
+        if len(fields) >= 2:
+            rows.append((fields[0], fields[1]))
+    if serial:
+        state = next((state for name, state in rows if name == serial), None)
+        if state != "device":
+            raise ScanLabError(f"adb serial {serial!r} is not online (state={state or 'missing'})")
+        return serial
+    online = [name for name, state in rows if state == "device"]
+    if len(online) == 0:
+        states = ", ".join(f"{name}:{state}" for name, state in rows) or "none"
+        raise ScanLabError(f"no online adb device; devices: {states}")
+    if len(online) > 1:
+        raise ScanLabError("more than one adb device is online; pass --serial " + ", ".join(online))
+    return online[0]
+
+
+def read_thermal(adb: str, serial: str) -> tuple[int, str]:
+    result = run_checked([adb, "-s", serial, "shell", "dumpsys", "thermalservice"])
+    output = (result.stdout + "\n" + result.stderr).strip()
+    if result.returncode != 0:
+        raise ScanLabError(f"could not read Pixel thermal status: {output}")
+    match = re.search(r"Thermal Status\s*:\s*(-?\d+)", output, re.IGNORECASE)
+    if match is None:
+        # Some Android builds print a status line with a slightly different
+        # heading. Accept the first explicit status integer, never guess 0.
+        match = re.search(r"(?:status|thermal)\s*[:=]\s*(-?\d+)", output, re.IGNORECASE)
+    if match is None:
+        raise ScanLabError("thermalservice returned no parseable thermal status")
+    return int(match.group(1)), output
+
+
+def pull_pixel(args: argparse.Namespace) -> int:
+    adb = shutil.which("adb")
+    if adb is None:
+        raise ScanLabError("adb is not on PATH; install Android platform-tools or activate the Android SDK")
+    serial = select_adb_device(adb, args.serial)
+    thermal, _ = read_thermal(adb, serial)
+    print(f"adb: {serial} online")
+    print(f"thermal status: {thermal}" + (" (non-nominal; timing is not comparable)" if thermal != 0 else " (nominal)"))
+    if args.require_nominal and thermal != 0:
+        raise ScanLabError("refusing collection because --require-nominal was set and thermal status is nonzero")
+
+    destination = Path(args.destination) if args.destination else Path("artifacts") / (
+        "pixel-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + re.sub(r"[^A-Za-z0-9_.-]", "_", serial)
+    )
+    destination = destination.expanduser()
+    if os.path.lexists(destination):
+        raise ScanLabError(f"refusing to overwrite existing destination: {destination}")
+    remote = args.remote.strip() if isinstance(args.remote, str) else ""
+    if not remote.startswith("/"):
+        raise ScanLabError("--remote must be an absolute device path")
+    partial = destination.parent / f".{destination.name}.partial-{uuid.uuid4().hex[:8]}"
+
+    def remove_partial() -> None:
+        if partial.exists():
+            try:
+                shutil.rmtree(partial)
+            except OSError:
+                pass
+
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        partial.mkdir()
+        result = subprocess.run(
+            [adb, "-s", serial, "pull", remote, str(partial)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise ScanLabError(f"adb pull failed for {remote}: {detail}")
+        manifest = {
+            "schema": "scanlab.pull",
+            "schemaVersion": 1,
+            "pulledAt": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+            "device": {"serial": serial, "thermalStatus": thermal},
+            "remote": remote,
+            "toolVersion": TOOL_VERSION,
+        }
+        # Put the manifest in the temporary tree before publishing it. A
+        # failed write must not leave a destination that looks complete.
+        (partial / "pull.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        partial.rename(destination)
+    except ScanLabError:
+        remove_partial()
+        raise
+    except OSError as exc:
+        remove_partial()
+        raise ScanLabError(f"could not complete Pixel pull: {exc}") from exc
+    print(f"pulled read-only data to {destination}")
+    print("device data was not deleted or modified")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="scanlab", description="Validate VialScanner debug bundles and pull Pixel artifacts safely")
+    sub = parser.add_subparsers(dest="command", required=True)
+    check = sub.add_parser("check", help="validate a versioned bundle and print a layer report")
+    check.add_argument("bundle", type=Path)
+    check.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
+    pull = sub.add_parser("pull-pixel", help="check adb and thermal state, then pull Pixel debug data without deleting it")
+    pull.add_argument("destination", nargs="?", help="new local destination directory; existing paths are refused")
+    pull.add_argument("--serial", help="adb device serial when more than one device is connected")
+    pull.add_argument("--remote", default=DEFAULT_PIXEL_REMOTE, help="remote directory to pull")
+    pull.add_argument("--require-nominal", action="store_true", help="refuse collection unless thermal status is 0")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "check":
+            report = validate_bundle(args.bundle.expanduser())
+            if args.as_json:
+                print(json.dumps(report_json(report), indent=2, sort_keys=True))
+            else:
+                print(render_report(report))
+            return 0 if not report.errors else 1
+        if args.command == "pull-pixel":
+            return pull_pixel(args)
+        parser.error(f"unknown command {args.command}")
+    except ScanLabError as exc:
+        print(f"scanlab: ERROR: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("scanlab: interrupted", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,3 @@
+{"event":"frame","index":0,"timestamp":0.0,"usable":true,"ocr":{"ran":true,"lines":["CAT. NO. 910801"],"durationMs":31},"fields":{"catalog":"910801"}}
+{"event":"frame","index":1,"timestamp":0.5,"usable":true,"ocr":{"ran":true,"lines":["LOT B411234"],"durationMs":29},"fields":{"lot":"B411234"}}
+{"event":"frame","index":2,"timestamp":1.0,"usable":true,"ocr":{"ran":false},"skipReason":"paced"}

@@ -1,0 +1,46 @@
+{
+  "schema": "scanlab.bundle",
+  "schemaVersion": 1,
+  "bundleId": "fixture-catalogue",
+  "createdAt": "2026-09-03T12:01:00Z",
+  "platform": "ios",
+  "goal": "catalogue",
+  "groundTruth": {
+    "mode": "new_vial",
+    "requiredFields": ["catalog", "lot", "clone", "vendor", "concentration", "volume", "expiry", "storage"],
+    "fields": {
+      "catalog": "ZX-2024",
+      "lot": "LOT-42",
+      "clone": "C1",
+      "vendor": "Acme",
+      "concentration": "1 mg/mL",
+      "volume": "100 uL",
+      "expiry": "2027-04",
+      "storage": "2-8 C"
+    }
+  },
+  "actual": {
+    "verdict": "notFound",
+    "fields": {
+      "catalog": "ZX-2024",
+      "lot": "LOT-42",
+      "clone": "C1",
+      "vendor": "Acme",
+      "concentration": "1 mg/mL",
+      "volume": "100 uL",
+      "expiry": "2027-04",
+      "storage": "2-8 C"
+    }
+  },
+  "capture": {
+    "framesSeen": 4,
+    "usableFrames": 4,
+    "ocrFrames": 4,
+    "rotation": {"required": true, "coverage": 0.95},
+    "durationMs": 5350,
+    "thermal": {"start": 0, "end": 0}
+  },
+  "artifacts": {
+    "trace": "trace.jsonl"
+  }
+}

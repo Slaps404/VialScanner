@@ -1,0 +1,41 @@
+{
+  "schema": "scanlab.bundle",
+  "schemaVersion": 1,
+  "bundleId": "fixture-known",
+  "createdAt": "2026-09-03T12:00:00Z",
+  "platform": "android",
+  "goal": "identify",
+  "groundTruth": {
+    "mode": "known_vial",
+    "abNo": "42",
+    "catalog": "910801",
+    "lot": "B411234",
+    "requiredFields": ["abNo", "catalog", "lot"],
+    "fields": {
+      "abNo": "42",
+      "catalog": "910801",
+      "lot": "B411234"
+    }
+  },
+  "actual": {
+    "verdict": "confident",
+    "abNo": "42",
+    "definitionName": "Fixture antibody",
+    "fields": {
+      "catalog": "910801",
+      "lot": "B411234"
+    }
+  },
+  "capture": {
+    "framesSeen": 3,
+    "usableFrames": 3,
+    "ocrFrames": 2,
+    "rotation": {"required": false, "coverage": 0.72},
+    "durationMs": 812,
+    "thermal": {"start": 0, "end": 0}
+  },
+  "artifacts": {
+    "trace": "trace.jsonl",
+    "observations": "observations.tape"
+  }
+}

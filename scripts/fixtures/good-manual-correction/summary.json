@@ -1,0 +1,36 @@
+{
+  "schema": "scanlab.bundle",
+  "schemaVersion": 1,
+  "bundleId": "fixture-manual-correction",
+  "createdAt": "2026-09-03T12:04:00Z",
+  "platform": "android",
+  "goal": "identify",
+  "groundTruth": {
+    "mode": "known_vial",
+    "abNo": "42",
+    "catalog": "910801",
+    "lot": "B411234",
+    "requiredFields": ["abNo", "catalog", "lot"]
+  },
+  "actual": {
+    "verdict": "confident",
+    "abNo": "42",
+    "fields": {"catalog": "910801", "lot": "B411999"},
+    "corrections": {
+      "lot": {
+        "original": "B411999",
+        "final": "B411234",
+        "provenance": "inventory_lookup",
+        "visibleOnLabel": false,
+        "reason": "Operator verified the lot against the inventory record"
+      }
+    }
+  },
+  "capture": {
+    "framesSeen": 2,
+    "usableFrames": 2,
+    "ocrFrames": 2,
+    "rotation": {"required": false, "coverage": 0.8}
+  },
+  "artifacts": {"trace": "trace.jsonl"}
+}

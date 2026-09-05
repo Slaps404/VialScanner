@@ -1,0 +1,36 @@
+{
+  "schema": "scanlab.bundle",
+  "schemaVersion": 1,
+  "bundleId": "fixture-mismatch",
+  "createdAt": "2026-09-03T12:02:00Z",
+  "platform": "android",
+  "goal": "identify",
+  "groundTruth": {
+    "mode": "known_vial",
+    "abNo": "42",
+    "catalog": "910801",
+    "lot": "B411234",
+    "requiredFields": ["abNo", "catalog", "lot"]
+  },
+  "actual": {
+    "verdict": "confident",
+    "abNo": "42",
+    "fields": {"catalog": "910801", "lot": "B999999"},
+    "corrections": {
+      "lot": {
+        "original": "B999999",
+        "final": "B411234",
+        "provenance": "label_transcription",
+        "visibleOnLabel": true,
+        "reason": "The lot was legible on the label after review"
+      }
+    }
+  },
+  "capture": {
+    "framesSeen": 2,
+    "usableFrames": 2,
+    "ocrFrames": 2,
+    "rotation": {"required": false, "coverage": 0.8}
+  },
+  "artifacts": {"trace": "trace.jsonl"}
+}

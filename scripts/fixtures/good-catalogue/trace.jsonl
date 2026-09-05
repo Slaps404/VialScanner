@@ -1,0 +1,4 @@
+{"event":"frame","index":0,"timestamp":0.0,"usable":true,"ocr":{"ran":true,"lines":["CAT ZX-2024","VENDOR Acme"],"durationMs":34},"fields":{"catalog":"ZX-2024","vendor":"Acme"}}
+{"event":"frame","index":1,"timestamp":1.4,"usable":true,"ocr":{"ran":true,"lines":["LOT LOT-42","CLONE C1"],"durationMs":32},"fields":{"lot":"LOT-42","clone":"C1"}}
+{"event":"frame","index":2,"timestamp":2.8,"usable":true,"ocr":{"ran":true,"lines":["1 mg/mL 100 uL"],"durationMs":31},"fields":{"concentration":"1 mg/mL","volume":"100 uL"}}
+{"event":"frame","index":3,"timestamp":4.2,"usable":true,"ocr":{"ran":true,"lines":["EXP 2027-04 2-8 C"],"durationMs":30},"fields":{"expiry":"2027-04","storage":"2-8 C"}}

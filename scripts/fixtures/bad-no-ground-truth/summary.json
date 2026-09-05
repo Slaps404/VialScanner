@@ -1,0 +1,16 @@
+{
+  "schema": "scanlab.bundle",
+  "schemaVersion": 1,
+  "bundleId": "fixture-no-ground-truth",
+  "createdAt": "2026-09-03T12:03:00Z",
+  "platform": "ios",
+  "goal": "identify",
+  "actual": {"verdict": "notFound"},
+  "capture": {
+    "framesSeen": 1,
+    "usableFrames": 1,
+    "ocrFrames": 1,
+    "rotation": {"required": false, "coverage": 0.2}
+  },
+  "artifacts": {"trace": "trace.jsonl"}
+}
