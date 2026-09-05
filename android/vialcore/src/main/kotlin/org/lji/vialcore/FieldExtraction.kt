@@ -103,6 +103,8 @@ private val rules: List<Rule> = listOf(
     Rule(LabelField.CATALOG, """\bNO\.?\s*:\s*([A-Z]\d{3,4})\b"""),
     // Peptide and reagent vendors print `Part`.
     Rule(LabelField.CATALOG, """\bPART\s*(?:NO|#)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-]{3,14})"""),
+    // Miltenyi prints the vendor product identifier as `Order no.`.
+    Rule(LabelField.CATALOG, """\bORDER\s*(?:NO|N0|NUMBER)\.?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-]{3,14})"""),
     Rule(LabelField.LOT, """LOT\s*(?:NO|#|:)?\s*[.:]?\s*([A-Z0-9][A-Z0-9\-]{3,16})"""),
     Rule(LabelField.CLONE, """CLONE\s*[:#]?\s*\(?\s*([A-Z0-9][A-Z0-9.\-]{1,12})"""),
     Rule(LabelField.CLONE, """\(\s*Clone\s+([A-Z0-9][A-Z0-9.\-]{1,12})\s*\)"""),
@@ -224,10 +226,10 @@ private fun isPlausible(field: LabelField, value: String): Boolean {
 // the label, which is a question about geometry, and the bounding boxes answer
 // it directly.
 
-/** A keyword line with nothing usable after it - `Cat. No.`, `REF`, `LOT #`. */
+/** A keyword line with nothing usable after it - `Cat. No.`, `Order no.`, `REF`, `LOT #`. */
 private val danglingKeywords: List<Pair<LabelField, Regex>> = listOf(
     LabelField.CATALOG to urx(
-        """(?:CAT(?:ALOG)?|PROD|PART|[RB]E[FEI])[A-Z]?\.?\s*(?:NO|N0|#)?\.?\s*[:#]?\s*$""",
+        """(?:CAT(?:ALOG)?|PROD|PART|ORDER|[RB]E[FEI])[A-Z]?\.?\s*(?:NO|N0|NUMBER|#)?\.?\s*[:#]?\s*$""",
         ignoreCase = true
     ),
     LabelField.LOT to urx(

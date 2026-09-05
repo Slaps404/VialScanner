@@ -81,6 +81,8 @@ private let rules: [Rule] = [
     .init(.catalog, #"\bNO\.?\s*:\s*([A-Z]\d{3,4})\b"#),
     // Peptide and reagent vendors print `Part`.
     .init(.catalog, #"\bPART\s*(?:NO|#)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-]{3,14})"#),
+    // Miltenyi prints the vendor product identifier as `Order no.`.
+    .init(.catalog, #"\bORDER\s*(?:NO|N0|NUMBER)\.?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-]{3,14})"#),
     .init(.lot,     #"LOT\s*(?:NO|#|:)?\s*[.:]?\s*([A-Z0-9][A-Z0-9\-]{3,16})"#),
     .init(.clone,   #"CLONE\s*[:#]?\s*\(?\s*([A-Z0-9][A-Z0-9\.\-]{1,12})"#),
     .init(.clone,   #"\(\s*Clone\s+([A-Z0-9][A-Z0-9\.\-]{1,12})\s*\)"#),
@@ -196,9 +198,9 @@ private func isPlausible(_ field: LabelField, _ value: String) -> Bool {
 // next to it on the label, which is a question about geometry, and the
 // bounding boxes answer it directly.
 
-/// A keyword line with nothing usable after it — `Cat. No.`, `REF`, `LOT #`.
+/// A keyword line with nothing usable after it - `Cat. No.`, `Order no.`, `REF`, `LOT #`.
 private let danglingKeywords: [(LabelField, NSRegularExpression)] = [
-    (.catalog, try! NSRegularExpression(pattern: #"(?:CAT(?:ALOG)?|PROD|PART|[RB]E[FEI])[A-Z]?\.?\s*(?:NO|N0|#)?\.?\s*[:#]?\s*$"#, options: [.caseInsensitive])),
+    (.catalog, try! NSRegularExpression(pattern: #"(?:CAT(?:ALOG)?|PROD|PART|ORDER|[RB]E[FEI])[A-Z]?\.?\s*(?:NO|N0|NUMBER|#)?\.?\s*[:#]?\s*$"#, options: [.caseInsensitive])),
     (.lot,     try! NSRegularExpression(pattern: #"LOT\.?\s*(?:NO|N0|#)?\.?\s*[:#]?\s*$"#, options: [.caseInsensitive])),
 ]
 
