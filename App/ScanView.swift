@@ -459,6 +459,7 @@ struct ScanView: View {
                 onConfirm: { confirm(result) },
                 onRescan: { rescan() },
                 onPark: { park(result) },
+                onDiscard: { discard() },
                 onReject: { trueAbNo, trueCatalog in reject(result, trueAbNo: trueAbNo, trueCatalog: trueCatalog) },
                 onReceive: { startReceive(result) },
                 onChoose: { abNo in confirm(result, abNo: abNo) }
@@ -556,6 +557,14 @@ struct ScanView: View {
         beginScan()
     }
 
+    /// Drop the result and any temporary evidence without adding a history row.
+    private func discard() {
+        cancelAuto()
+        camera.discardPendingClip()
+        Haptics.tap()
+        finishResultAction()
+    }
+
     // MARK: - Committing a result
 
     /// Build the log entry once, so every outcome records the same evidence.
@@ -627,7 +636,7 @@ struct ScanView: View {
         var text = bannerText(for: result, abNo: overrideAbNo)
         if let filed { text += " · filed to \(filed)" }
         store.banner = AppStore.Banner(text: text)
-        afterCommit()
+        finishResultAction()
     }
 
     private func bannerText(for result: ScanResult, abNo: String? = nil) -> String {
@@ -652,7 +661,7 @@ struct ScanView: View {
         Haptics.commit()
         store.banner = AppStore.Banner(
             text: clip == nil ? "Saved for review (no clip was recorded)" : "Saved for review with clip")
-        afterCommit()
+        finishResultAction()
     }
 
     private func reject(_ result: ScanResult, trueAbNo: String? = nil, trueCatalog: String? = nil) {
@@ -667,7 +676,7 @@ struct ScanView: View {
             built.trueCatalog = trueCatalog
             store.log(built)
         }
-        afterCommit()
+        finishResultAction()
     }
 
     private func startReceive(_ result: ScanResult) {
@@ -771,7 +780,7 @@ struct ScanView: View {
         rememberReceivingDefaults(item)
         store.banner = AppStore.Banner(text: "AbNo \(item.abNo) received into inventory")
         Haptics.commit()
-        afterCommit()
+        finishResultAction()
     }
 
     /// Whatever owner/location/box just got typed in becomes next scan's
@@ -784,9 +793,9 @@ struct ScanView: View {
         if store.activeSessionBox == nil, !item.box.isEmpty { store.settings.defaultBox = item.box }
     }
 
-    /// After anything is committed: keep the line moving in hands-free, go back
-    /// to a live idle viewfinder otherwise.
-    private func afterCommit() {
+    /// After a result action: keep the line moving in hands-free, or return to
+    /// a live idle viewfinder otherwise.
+    private func finishResultAction() {
         clipNote = ""
         camera.cancelScan()
         if store.settings.handsFree {

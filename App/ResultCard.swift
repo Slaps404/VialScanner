@@ -1,7 +1,7 @@
 import SwiftUI
 import VialCore
 
-/// The verdict, and the four things you can do about it.
+/// The verdict, and the things you can do about it.
 ///
 /// The card's job is to make "we are sure" and "we are guessing" look visibly
 /// different. A lab that learns to tap through an amber card the same way it
@@ -23,6 +23,7 @@ struct ResultCard: View {
     let onConfirm: () -> Void
     let onRescan: () -> Void
     let onPark: () -> Void
+    let onDiscard: () -> Void
     /// Reject, with whatever correction the operator supplied: (true AbNo,
     /// true catalog). Both nil means "don't know" - a real, logged answer.
     let onReject: (String?, String?) -> Void
@@ -404,9 +405,7 @@ struct ResultCard: View {
         if result.readNothing {
             HStack(spacing: 10) {
                 Pill(title: "Try again", icon: "arrow.clockwise", kind: .solid) { onRescan() }
-                // Nothing was read, so there is no verdict to correct - straight
-                // reject, no correction sheet.
-                Pill(title: "Cancel", kind: .quiet, wide: false) { onReject(nil, nil) }
+                Pill(title: "Discard", icon: "trash", kind: .danger, wide: false) { onDiscard() }
             }
         } else {
             VStack(spacing: 10) {
@@ -435,6 +434,8 @@ struct ResultCard: View {
                 if result.verdict != .notFound {
                     Pill(title: "Wrong match", icon: "xmark", kind: .danger) { showRejectSheet = true }
                 }
+
+                Pill(title: "Discard", icon: "trash", kind: .quiet) { onDiscard() }
             }
         }
     }

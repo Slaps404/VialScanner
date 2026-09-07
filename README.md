@@ -280,9 +280,10 @@ What is in it:
   vial is lined up while the last one is still being decided. The rectangle is
   not decoration: recognition is restricted to exactly that region, so a reticle
   that lied would cost real scans.
-* **Four actions on every result**: confirm and save, rescan, park for review
-  keeping the video, and receive as a new vial. A parked scan *always* keeps its
-  clip, whatever the clip toggle says — that is the whole point of parking.
+* **Result actions**: confirm and save, rescan, park for review keeping the
+  video, receive as a new vial, or discard without logging the scan. A parked
+  scan *always* keeps its clip, whatever the clip toggle says. That is the
+  whole point of parking.
 * **Clips.** Every scan can be recorded from the same frames the engine reads,
   written straight to a file by `AVAssetWriter`. Clips start in the temporary
   directory and are only moved into Documents when someone keeps one; they age

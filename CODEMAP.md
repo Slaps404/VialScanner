@@ -65,10 +65,10 @@ SettingsView.swift     Hands-free mode, clip retention, receiving defaults, engi
 Theme.swift / Components.swift / Feedback.swift   Design system, shared widgets, speech+haptics.
 ```
 
-Four actions on every scan result: confirm & save, rescan, park for review
-(keeps the clip regardless of the clip setting), or receive as a new vial.
-`ScanResult.verdict` is the gate for all of them — see README "Wiring to
-Airtable" for the exact rule per verdict.
+Result actions include confirm & save, rescan, park for review (keeps the clip
+regardless of the clip setting), receive as a new vial, or discard without a
+history row. `ScanResult.verdict` is the gate for the commit actions. See
+README "Wiring to Airtable" for the exact rule per verdict.
 
 ## Data flow / persistence
 
