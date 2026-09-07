@@ -79,8 +79,11 @@ class AppStore(private val context: Context) {
             val snap = runCatching { json.decodeFromString<Snapshot>(f.readText()) }.getOrNull()
             if (snap != null) {
                 defs = snap.defs; items = snap.items; scans = snap.scans
-                audits = snap.audits; settings = snap.settings
+                audits = snap.audits; settings = snap.settings.migrated()
                 rebuild()
+                // Write the repair back, or Settings keeps showing a value the
+                // engine no longer uses.
+                if (settings != snap.settings) save()
                 return
             }
             banner = Banner("The saved store could not be read; starting from the bundled catalog.", isError = true)

@@ -71,8 +71,10 @@ final class AppStore: ObservableObject {
         if let data = try? Data(contentsOf: storeURL),
            let snap = try? JSONDecoder.vial.decode(Snapshot.self, from: data) {
             defs = snap.defs; items = snap.items; scans = snap.scans
-            audits = snap.audits; settings = snap.settings
+            audits = snap.audits; settings = snap.settings.migrated()
             rebuild()
+            // `settings` schedules a save on set, so the repair persists and
+            // Settings stops showing a value the engine no longer uses.
             return
         }
         seedFromBundle()

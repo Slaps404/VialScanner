@@ -152,6 +152,14 @@ struct ScanRecord: Codable, Identifiable, Hashable {
     var vendor: String? = nil
     var clone: String? = nil
     var barcode: String? = nil
+    // Label facts that do not decide identity but are still what the scan read.
+    // The confirm path used to drop them, so a freshly-read expiry or storage
+    // temperature survived nowhere once the vial was already on record.
+    var concentration: String? = nil
+    var volume: String? = nil
+    var isotype: String? = nil
+    var expiry: String? = nil
+    var storage: String? = nil
     var score: Double = 0
     var margin: Double = 0
     var reasons: [String] = []
@@ -319,7 +327,7 @@ struct AppSettings: Codable {
     /// The knob people actually reach for: too low and the scanner answers
     /// before the vial has been turned, too high and every scan feels slow.
     var minScanSeconds: Double = 1.0
-    var maxScanSeconds: Double = 4.0
+    var maxScanSeconds: Double = Self.maxScanDefault
     /// Faces of the label that must be read before a text verdict settles. Set
     /// to 1 for a lab whose labels carry everything on one side.
     var minDistinctViews: Int = 2
@@ -327,17 +335,30 @@ struct AppSettings: Codable {
 
     var autoCommit: Verdict { Verdict(rawValue: autoCommitVerdict) ?? .confident }
 
+    /// Anchored to the physical task, see README "When a scan stops".
+    static let maxScanDefault: Double = 9
+    /// Matches the Settings slider's lower bound.
+    static let maxScanFloor: Double = 5
+
+    /// Repairs a stored value the current UI could not have produced.
+    ///
+    /// Settings saved before the deadline moved to 9 s still hold the old 4 s,
+    /// and `engineConfig` used to rescue that to the 5 s floor. Five seconds is
+    /// short of the 1.5 rotations a wrapped label needs, so those scans ended
+    /// with part of the label never turned into view. A value below what the
+    /// slider can reach was never chosen, so take the default instead.
+    func migrated() -> AppSettings {
+        guard maxScanSeconds < Self.maxScanFloor else { return self }
+        var copy = self
+        copy.maxScanSeconds = Self.maxScanDefault
+        return copy
+    }
+
     func engineConfig() -> EngineConfig {
         var c = EngineConfig()
-        c.maxOCRFrames = maxOCRFrames
-        c.maxScanDuration = maxScanSeconds
-        // The floor can never cross the ceiling: a minimum above the give-up
-        // time would mean no verdict is ever allowed to settle on its own.
-        c.minScanDuration = min(minScanSeconds, maxScanSeconds - 0.5)
-        c.minDistinctViews = max(1, minDistinctViews)
-        // Grace is measured from the give-up time, so raising that knob does not
-        // quietly eat the extra seconds a scan gets when it has read nothing.
-        c.hardScanCeiling = max(20.0, maxScanSeconds + 2 * c.graceExtension)
+        c.maxScanDuration = max(Self.maxScanFloor, maxScanSeconds)
+        c.minScanDuration = max(0, min(minScanSeconds, c.maxScanDuration - 0.5))
+        c.hardScanCeiling = c.maxScanDuration
         let inset = min(max(roiInset, 0), 0.4)
         c.regionOfInterest = CGRect(x: inset, y: inset * 1.3,
                                     width: 1 - inset * 2, height: 1 - inset * 2.6)

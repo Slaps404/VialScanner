@@ -178,6 +178,9 @@ data class ScanRecord(
     /** Filename under the Clips directory, or null when this scan's video was
      *  never recorded or was thrown away. Mirrors Swift's `ScanRecord.clipFile`. */
     var clipFile: String? = null,
+    /** A successful receive can still need a human check when the operator
+     *  corrected a value and explicitly verified that correction on the label. */
+    var reviewReason: String? = null,
     /** Relative reference to the structured Android debug bundle. */
     var debugBundle: String? = null,
     /** Set only on a rejected scan where the operator identified the real
@@ -291,6 +294,125 @@ data class ReceiveDraft(
     val sources: Map<String, FieldSource> = emptyMap(),
 )
 
+/** One machine-prefilled field compared with what the operator saved. */
+@Serializable
+data class ReceiveFieldDiff(
+    val field: String,
+    val machineValue: String,
+    val finalValue: String,
+    val machineSource: String? = null,
+    val changed: Boolean,
+    /** False means the edit is user input only, not evidence from the label. */
+    val labelVisibleConfirmed: Boolean,
+)
+
+/** The receive handoff keeps both sides of the correction for later review. */
+data class ReceiveSave(
+    val item: ItemRecord,
+    val definition: DefRecord? = null,
+    val machineItem: ItemRecord,
+    val machineDefinition: DefRecord? = null,
+    val sources: Map<String, FieldSource> = emptyMap(),
+    val labelVisibleConfirmed: Boolean = false,
+) {
+    val fieldDiffs: List<ReceiveFieldDiff> = receiveFieldDiffs(
+        machineItem, item, machineDefinition, definition, sources, labelVisibleConfirmed,
+    )
+
+    val hasVisibleCorrections: Boolean
+        get() = labelVisibleConfirmed && fieldDiffs.any { it.changed }
+}
+
+private fun receiveFieldDiffs(
+    machineItem: ItemRecord,
+    finalItem: ItemRecord,
+    machineDefinition: DefRecord?,
+    finalDefinition: DefRecord?,
+    sources: Map<String, FieldSource>,
+    labelVisibleConfirmed: Boolean,
+): List<ReceiveFieldDiff> {
+    val machine = linkedMapOf(
+        "AbNo" to machineItem.abNo,
+        "Vial name" to machineItem.vialName,
+        "Definition" to machineItem.definitionName,
+        "Lot" to machineItem.lot,
+        "Concentration" to machineItem.concentration,
+        COL_VOLUME to machineItem.extra.value(COL_VOLUME),
+        COL_EXPIRY to machineItem.extra.value(COL_EXPIRY),
+        COL_STORAGE to machineItem.extra.value(COL_STORAGE),
+        "Location" to machineItem.location,
+        "Box" to machineItem.box,
+        "Owner" to machineItem.owner,
+        "Notes" to machineItem.notes,
+    )
+    val saved = linkedMapOf(
+        "AbNo" to finalItem.abNo,
+        "Vial name" to finalItem.vialName,
+        "Definition" to finalItem.definitionName,
+        "Lot" to finalItem.lot,
+        "Concentration" to finalItem.concentration,
+        COL_VOLUME to finalItem.extra.value(COL_VOLUME),
+        COL_EXPIRY to finalItem.extra.value(COL_EXPIRY),
+        COL_STORAGE to finalItem.extra.value(COL_STORAGE),
+        "Location" to finalItem.location,
+        "Box" to finalItem.box,
+        "Owner" to finalItem.owner,
+        "Notes" to finalItem.notes,
+    )
+    val defMachine = linkedMapOf(
+        "Definition name" to (machineDefinition?.name ?: ""),
+        "Target" to (machineDefinition?.target ?: ""),
+        "Clone" to (machineDefinition?.clone ?: ""),
+        "Host" to (machineDefinition?.host ?: ""),
+        "Isotype" to (machineDefinition?.isotype ?: ""),
+        "Vendor" to (machineDefinition?.vendor ?: ""),
+        "Catalog #" to (machineDefinition?.catalog ?: ""),
+    )
+    val defSaved = linkedMapOf(
+        "Definition name" to (finalDefinition?.name ?: ""),
+        "Target" to (finalDefinition?.target ?: ""),
+        "Clone" to (finalDefinition?.clone ?: ""),
+        "Host" to (finalDefinition?.host ?: ""),
+        "Isotype" to (finalDefinition?.isotype ?: ""),
+        "Vendor" to (finalDefinition?.vendor ?: ""),
+        "Catalog #" to (finalDefinition?.catalog ?: ""),
+    )
+    fun List<FieldEntryDTO>.appendExtras(target: MutableMap<String, String>) {
+        for (entry in this) target.putIfAbsent("extra:${entry.name}", entry.value)
+    }
+    machineItem.extra.appendExtras(machine)
+    finalItem.extra.appendExtras(saved)
+
+    val names = LinkedHashSet<String>().apply { addAll(machine.keys); addAll(saved.keys) }
+    val out = ArrayList<ReceiveFieldDiff>(names.size + defMachine.size)
+    for (name in names) {
+        val before = machine[name] ?: ""
+        val after = saved[name] ?: ""
+        out += ReceiveFieldDiff(
+            field = name,
+            machineValue = before,
+            finalValue = after,
+            machineSource = sources[name]?.name,
+            changed = before != after,
+            labelVisibleConfirmed = labelVisibleConfirmed,
+        )
+    }
+    val defNames = LinkedHashSet<String>().apply { addAll(defMachine.keys); addAll(defSaved.keys) }
+    for (name in defNames) {
+        val before = defMachine[name] ?: ""
+        val after = defSaved[name] ?: ""
+        out += ReceiveFieldDiff(
+            field = name,
+            machineValue = before,
+            finalValue = after,
+            machineSource = sources[name]?.name,
+            changed = before != after,
+            labelVisibleConfirmed = labelVisibleConfirmed,
+        )
+    }
+    return out
+}
+
 // MARK: - Settings
 
 @Serializable
@@ -337,27 +459,38 @@ data class AppSettings(
     // Engine knobs, surfaced because the right values are lab-dependent.
     var maxOCRFrames: Int = 24,
     var minScanSeconds: Double = 1.0,
-    var maxScanSeconds: Double = 4.0,
+    var maxScanSeconds: Double = MAX_SCAN_DEFAULT,
     var minDistinctViews: Int = 2,
     var roiInset: Double = 0.15,
 ) {
     val autoCommit: Verdict
         get() = runCatching { Verdict.valueOf(autoCommitVerdict) }.getOrDefault(Verdict.CONFIDENT)
 
+    /** Repairs a stored value the current UI could not have produced.
+     *
+     *  Settings saved before the deadline moved to 9 s still hold the old 4 s,
+     *  and `engineConfig` used to rescue that to the 5 s floor. Five seconds is
+     *  short of the 1.5 rotations a wrapped label needs, so those scans ended
+     *  with part of the label never turned into view. A value below what the
+     *  slider can reach was never chosen, so take the default instead. */
+    fun migrated(): AppSettings =
+        if (maxScanSeconds < MAX_SCAN_FLOOR) copy(maxScanSeconds = MAX_SCAN_DEFAULT) else this
+
     fun engineConfig(): org.lji.vialcore.EngineConfig {
         val c = org.lji.vialcore.EngineConfig()
-        c.maxOCRFrames = maxOCRFrames
-        c.maxScanDuration = maxScanSeconds
-        // The floor can never cross the ceiling: a minimum above the give-up
-        // time would mean no verdict is ever allowed to settle on its own.
-        c.minScanDuration = minOf(minScanSeconds, maxScanSeconds - 0.5)
-        c.minDistinctViews = maxOf(1, minDistinctViews)
-        // Grace is measured from the give-up time, so raising that knob does not
-        // quietly eat the extra seconds a scan gets when it has read nothing.
-        c.hardScanCeiling = maxOf(20.0, maxScanSeconds + 2 * c.graceExtension)
+        c.maxScanDuration = maxOf(MAX_SCAN_FLOOR, maxScanSeconds)
+        c.minScanDuration = minScanSeconds.coerceIn(0.0, c.maxScanDuration - 0.5)
+        c.hardScanCeiling = c.maxScanDuration
         val inset = roiInset.coerceIn(0.0, 0.4)
         c.regionOfInterest = org.lji.vialcore.NormRect(inset, inset * 1.3, 1 - inset * 2, 1 - inset * 2.6)
         return c
+    }
+
+    companion object {
+        /** Anchored to the physical task, see README "When a scan stops". */
+        const val MAX_SCAN_DEFAULT = 9.0
+        /** Matches the Settings slider's lower bound. */
+        const val MAX_SCAN_FLOOR = 5.0
     }
 }
 

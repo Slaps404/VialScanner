@@ -149,7 +149,7 @@ fun ScanScreen(
         delay((store.settings.handsFreeDelay * 1000).toLong())
         if (controller.state !== s) return@LaunchedEffect
         when {
-            meetsBar(r.verdict, store.settings.autoCommit) && r.vial != null -> {
+            meetsBar(r.verdict, store.settings.autoCommit) && r.canAutoConfirm -> {
                 flash = confirm(store, controller, r, keepClip, clipNote)
                 clipNote = ""
                 controller.rescan(recordThisScan)
@@ -204,7 +204,9 @@ fun ScanScreen(
         }
 
         Column(
-            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+            // imePadding keeps the result card, and the clip note inside it,
+            // above the keyboard. Without it the note field is typed blind.
+            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
             TopBar(store, controller, openMenu, tip) {
@@ -230,6 +232,11 @@ fun ScanScreen(
                     onClipNoteChange = { clipNote = it },
                     onConfirm = {
                         flash = confirm(store, controller, state.result, keepClip, clipNote)
+                        clipNote = ""
+                        controller.rescan(recordThisScan)
+                    },
+                    onChoose = { abNo ->
+                        flash = confirm(store, controller, state.result, keepClip, clipNote, abNo)
                         clipNote = ""
                         controller.rescan(recordThisScan)
                     },
@@ -695,30 +702,13 @@ private fun ScanningControls(
         }
         Spacer(Modifier.height(12.dp))
 
-        // The bar tracks readiness to answer, not frames burned: elapsed time,
-        // OCR passes and how much of the label has actually been turned into
-        // view. A bar that fills at a fixed rate tells the user nothing about
-        // whether rotating further would help.
+        // Time spent collecting; this does not measure label completeness.
         LinearProgressIndicator(
             progress = { state.progress.toFloat() },
             color = Color.White, trackColor = Color.White.copy(alpha = 0.25f),
             modifier = Modifier.fillMaxWidth(0.8f).height(3.dp),
         )
         Spacer(Modifier.height(12.dp))
-
-        // Faces of the label seen so far. This is the one piece of engine state
-        // worth showing outright: "keep rotating" is a nag, but a pip that
-        // lights up when a new side registers tells the user what the scanner is
-        // actually waiting for.
-        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            repeat(3) { i ->
-                Box(
-                    Modifier.width(16.dp).height(3.dp).clip(CircleShape)
-                        .background(Color.White.copy(alpha = if (i < state.views) 0.95f else 0.25f))
-                )
-            }
-        }
-        Spacer(Modifier.height(14.dp))
 
         // Two ways out, and they are not the same thing. "Read what you have"
         // ends the scan with a verdict built from partial evidence; Cancel
@@ -779,6 +769,7 @@ private fun ResultPanel(
     clipNote: String,
     onClipNoteChange: (String) -> Unit,
     onConfirm: () -> Unit,
+    onChoose: (String) -> Unit,
     onPark: () -> Unit,
     onReceive: () -> Unit,
     onRescan: () -> Unit,
@@ -794,15 +785,15 @@ private fun ResultPanel(
                 Verdict.NOT_FOUND -> Ink.accent
             }
             val headline = if (r.readNothing) "Nothing read" else when (r.verdict) {
-                Verdict.CERTAIN, Verdict.CONFIDENT -> "Identified"
+                Verdict.CERTAIN, Verdict.CONFIDENT -> if (r.vial == null) "Product identified" else "Inventory match"
                 Verdict.AMBIGUOUS -> "Not sure"
-                Verdict.NOT_FOUND -> "New vial"
+                Verdict.NOT_FOUND -> "No match"
             }
             val sub = if (r.readNothing) "The camera never read the label" else when (r.verdict) {
                 Verdict.CERTAIN -> "Matched by barcode"
                 Verdict.CONFIDENT -> "Matched from label text"
                 Verdict.AMBIGUOUS -> "Best guess - confirm before use"
-                Verdict.NOT_FOUND -> "Nothing on file matches this label"
+                Verdict.NOT_FOUND -> "Review the label before receiving a new vial"
             }
 
             Text(headline, color = tint, fontSize = Type.display, fontWeight = Type.displayWeight)
@@ -832,6 +823,21 @@ private fun ResultPanel(
                 Spacer(Modifier.height(12.dp))
                 Text("Lot not on record - a new lot of a known antibody", color = Ink.warn, fontSize = Type.label)
                 Mono(r.otherVials.joinToString(", ") { "AbNo ${it.abNo} lot ${it.lot}" })
+            }
+
+            if (vial == null && r.otherVials.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text("Label evidence does not identify one inventory record. Choose only if you can verify it.",
+                    color = Ink.warn, fontSize = Type.label)
+                r.otherVials.forEach { candidate ->
+                    SecondaryButton(
+                        "Choose AbNo ${candidate.abNo} · lot ${candidate.lot} · ${candidate.box}",
+                        Modifier.fillMaxWidth(),
+                    ) { onChoose(candidate.abNo) }
+                }
+            }
+            if (vial != null && !r.canAutoConfirm) {
+                Text("Check the label before confirming this proposed match.", color = Ink.warn, fontSize = Type.label)
             }
 
             Spacer(Modifier.height(12.dp))
@@ -982,14 +988,18 @@ private fun confirm(
     r: ScanResult,
     keepClip: Boolean,
     note: String = "",
+    chosenAbNo: String? = null,
 ): String {
-    val abNo = r.vial?.abNo ?: run { controller.discardPendingClip(); return "Nothing to confirm" }
+    val abNo = chosenAbNo?.takeIf { id -> r.otherVials.any { it.abNo == id } } ?: r.vial?.abNo ?: run { controller.discardPendingClip(); return "Nothing to confirm" }
     val clip = attachClip(store, controller, r, keepClip, note)
     val open = store.openAudit
-    val logged = store.log(record(r, ScanOutcome.CONFIRMED, clip, note).copy(auditID = open?.id))
+    val logged = store.log(record(r, ScanOutcome.CONFIRMED, clip, note).copy(
+        auditID = open?.id, abNo = abNo,
+        note = if (chosenAbNo != null) "Inventory record selected by the user; label evidence did not distinguish it." else "",
+    ))
     store.markConfirmed(abNo, logged.id)
     val filed = store.stampSessionBox(abNo)
-    if (open != null) store.recordFound(abNo, open.id, method = "scan", scanID = logged.id)
+    if (open != null) store.recordFound(abNo, open.id, method = if (chosenAbNo == null) "scan" else "manual", scanID = logged.id)
     Haptics.commit()
     var text = "Confirmed AbNo $abNo"
     if (filed != null) text += " · filed to $filed"

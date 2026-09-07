@@ -1,9 +1,23 @@
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
 }
+
+// Fingerprint the inputs so two debug APKs never masquerade as the same build.
+val sourceDigest = MessageDigest.getInstance("SHA-256")
+val sourceInputs = (fileTree("src/main").files + project(":vialcore").fileTree("src/main").files +
+    setOf(buildFile, project(":vialcore").buildFile, rootProject.buildFile, rootProject.file("settings.gradle.kts")))
+sourceInputs.filter { it.isFile }.sortedBy { it.relativeTo(rootProject.projectDir).path }.forEach {
+    sourceDigest.update(it.relativeTo(rootProject.projectDir).path.toByteArray())
+    sourceDigest.update(0.toByte())
+    sourceDigest.update(it.readBytes())
+    sourceDigest.update(0.toByte())
+}
+val sourceID = sourceDigest.digest().joinToString("") { "%02x".format(it) }
 
 android {
     namespace = "org.lji.vialscanner"
@@ -15,6 +29,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1"
+        buildConfigField("String", "SOURCE_ID", "\"$sourceID\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     // buildConfig: the clip sidecar records an app version so a video found
@@ -55,6 +70,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
 
     // The video replay harness: the Android counterpart of the vialscan CLI.
+    testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
