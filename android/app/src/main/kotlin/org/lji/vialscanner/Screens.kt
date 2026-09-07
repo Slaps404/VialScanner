@@ -474,8 +474,7 @@ fun SettingsScreen(store: AppStore, openMenu: () -> Unit) {
 
             SectionCard("Engine") {
                 Text(
-                    "These decide when an answer is allowed to count, not how accurate it is. " +
-                        "Raise the floor if the scanner answers before the vial has been turned.",
+                    "Timing controls collection length. Repeated evidence and an unambiguous inventory record are required for automatic confirmation.",
                     color = Ink.textSecond, fontSize = Type.label, lineHeight = Type.body,
                 )
                 Spacer(Modifier.height(6.dp))
@@ -484,18 +483,9 @@ fun SettingsScreen(store: AppStore, openMenu: () -> Unit) {
                     s.minScanSeconds, 0.0..5.0, { "%.1fs".format(it) },
                 ) { store.updateSettings { c -> c.copy(minScanSeconds = it) } }
                 SliderRow(
-                    "Give up after", "Answers with whatever it has once this runs out.",
-                    s.maxScanSeconds, 2.0..15.0, { "%.0fs".format(it) },
+                    "Collection window", "Stop early for a supported inventory match; otherwise collect, then review. Minimum 5 seconds.",
+                    s.maxScanSeconds, 5.0..15.0, { "%.0fs".format(it) },
                 ) { store.updateSettings { c -> c.copy(maxScanSeconds = it) } }
-                SliderRow(
-                    "Label faces required",
-                    "Distinct sides of the label, not frames. Turning the vial is what earns these.",
-                    s.minDistinctViews.toDouble(), 1.0..4.0, { "%.0f".format(it) },
-                ) { store.updateSettings { c -> c.copy(minDistinctViews = it.toInt()) } }
-                SliderRow(
-                    "OCR frame budget", "How many frames may be sent to text recognition per scan.",
-                    s.maxOCRFrames.toDouble(), 6.0..60.0, { "%.0f".format(it) },
-                ) { store.updateSettings { c -> c.copy(maxOCRFrames = it.toInt()) } }
                 SliderRow(
                     "Aiming inset", "How far in from the edges the scanner is allowed to look.",
                     s.roiInset, 0.0..0.4, { "%.2f".format(it) },

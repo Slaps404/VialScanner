@@ -36,91 +36,28 @@ interface VialFrame {
 }
 
 class EngineConfig {
-    /** Restrict recognition to the centre of the frame, matching the on-screen
-     *  reticle the user aims with: OCR cost scales with pixel area and the outer
-     *  band is floor, freezer and glove. Normalised, origin bottom-left. */
+    // Recognition stays paced; elapsed time is the single collection budget.
     var regionOfInterest: NormRect? = NormRect(0.15, 0.20, 0.70, 0.60)
-    /** Run the barcode pass on every Nth frame. Codes stay in view for many
-     *  consecutive frames, so sampling costs almost no decode opportunities. */
     var barcodeEveryNthFrame = 2
-    /** Cap how many frames ever reach OCR; the sample set resolved on 4-5.
-     *  Only passes that come back with usable text are charged against this
-     *  cap: a budget spent on empty bench is a budget the label never gets. */
-    var maxOCRFrames = 24
-    /** Minimum gap between OCR passes, so a fast shutter cannot flood the queue. */
-    var minOCRInterval: Double = 0.15
-
-    // ---- Empty-frame backoff ------------------------------------------------
-    // A run of OCR passes that read nothing is the only free evidence that
-    // nothing is in frame. See README "Empty-frame backoff".
-
-    /** Consecutive empty OCR passes before the pacing interval widens. */
+    var minOCRInterval = 0.15
     var emptyOCRFramesBeforeBackoff = 3
-    /** The pacing interval is multiplied by this once per empty pass past the
-     *  threshold. 1.0 or less disables the backoff. */
-    var ocrBackoffFactor: Double = 1.6
-    /** Ceiling on the widened interval, so a label brought into frame is still
-     *  picked up without a visible stall. */
-    var maxOCRInterval: Double = 0.6
-    /** Back off only before the first successful read. Applying it throughout
-     *  also throttles blurred frames mid-scan and costs verdicts; false lets the
-     *  harness sweep that. */
+    var ocrBackoffFactor = 1.6
+    var maxOCRInterval = 0.6
     var backoffOnlyBeforeFirstText = true
-    /** Frames below this fraction of the sharpest recent frame are skipped. */
-    var sharpnessRatio: Double = 0.45
-    /** How many recent gated frames the bar is drawn from. A still frame shot
-     *  before the vial is turned must not set the bar for the whole rotation. */
-    var sharpnessWindow: Int = 8
+    var sharpnessRatio = 0.45
+    var sharpnessWindow = 8
     var earlyExitOnBarcode = true
     var earlyExitMinFrames = 4
-
-    // ---- Patience -----------------------------------------------------------
-    //
-    // These are not accuracy gates. They gate *when an answer is allowed to
-    // count*, so the engine waits until the user has actually presented the vial
-    // rather than until the first plausible reading turns up. Without them a
-    // barcode decoded on frame one ends the scan with the label never read - and
-    // the answer is usually right, which is worse, because then the failures are
-    // the ones nobody goes looking for.
-
-    /** No verdict settles before this much stream time, whatever the evidence. */
-    var minScanDuration: Double = 1.0
-    /** A payload must decode in this many frames before it may end the scan. */
+    var minScanDuration = 1.0
     var barcodeConfirmations = 2
-    /** Distinct faces of the label required before a text verdict may settle. */
-    var minDistinctViews = 2
-    /** ...or, failing rotation, this many text-bearing frames that add nothing
-     *  new: the visible face has given up everything it has. */
-    var saturationFrames = 4
-    /** The same answer must come back this many resolves running. */
     var settleConfirmations = 2
-    /** Give up after this much elapsed stream time, so failure is not slower
-     *  than success. */
-    var maxScanDuration: Double = 4.0
-
-    // ---- Grace --------------------------------------------------------------
-    //
-    // A deadline is a promise to stop guessing, not a promise to produce an
-    // answer. When the cap arrives having read nothing, the matcher says
-    // "new vial - nothing on file matches this label" about a vial nobody ever
-    // read. Nothing was wrong with it; the camera had not seen it yet. So give
-    // the time back rather than spend it on a verdict.
-
-    var graceExtension: Double = 2.5
-    /** Absolute ceiling: a scanner that never stops is worse than one that
-     *  admits it failed. Long enough for a full unhurried rotation. */
-    var hardScanCeiling: Double = 20.0
-    /** OCR passes added with each extension, so the extra seconds are usable. */
-    var ocrFramesPerExtension = 12
-    /** Minimum stream time reserved for a new or unresolved vial to expose its
-     * label. A deliberate hand rotation takes about 3-5 seconds; saturation
-     * before this point only means that one visible face was read repeatedly. */
-    var minHarvestDuration: Double = 5.0
+    var maxScanDuration = 9.0
+    var hardScanCeiling = 20.0
     var match = MatchConfig()
 }
 
 sealed class ScanState {
-    /** `progress` is readiness to answer, not frames burned. */
+    /** Progress is elapsed collection time, not label coverage. */
     data class Scanning(
         val framesSeen: Int,
         val ocrFrames: Int,
@@ -133,13 +70,7 @@ sealed class ScanState {
     data class Finished(val result: ScanResult) : ScanState()
 }
 
-/**
- * Drives the two-tier pipeline over a stream of frames.
- *
- * Fed live: [ingest] is called for every camera frame and returns immediately,
- * so the work happens *during* the user's rotation. By the time they stop
- * turning the vial, the answer already exists.
- */
+/** Runs recognition synchronously on the caller's background queue. */
 class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
     val matcher = Matcher(catalog, config.match)
 
@@ -161,9 +92,7 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
     private var pendingCount = 0
 
     /** When the scan currently intends to stop, and how often that has moved. */
-    private var deadline = config.maxScanDuration
-    private var ocrBudget = config.maxOCRFrames
-    private var extensionsGranted = 0
+    private val deadline: Double get() = minOf(config.maxScanDuration, config.hardScanCeiling).coerceAtLeast(0.0)
     private var latestTextBoxes: List<NormRect> = emptyList()
 
     /** Consecutive OCR passes that came back with no usable text. */
@@ -175,9 +104,6 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
         recentSharpness.clear(); lastOCRTime = Double.NEGATIVE_INFINITY
         settled = null; firstTimestamp = null
         pendingIdentity = null; pendingCount = 0
-        deadline = config.maxScanDuration
-        ocrBudget = config.maxOCRFrames
-        extensionsGranted = 0
         latestTextBoxes = emptyList()
         emptyOCRRun = 0
     }
@@ -187,12 +113,13 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
         framesSeen += 1
         if (firstTimestamp == null) firstTimestamp = frame.timestamp
         val elapsed = frame.timestamp - (firstTimestamp ?: frame.timestamp)
+        if (elapsed >= deadline) return ScanState.Finished(finish())
 
         // ---- Tier 1: barcode, full resolution, sampled ----------------------
         if (config.barcodeEveryNthFrame > 0 &&
             (framesSeen - 1) % config.barcodeEveryNthFrame == 0
         ) {
-            for (b in frame.detectBarcodes(config.regionOfInterest)) {
+            for (b in frame.detectBarcodes(config.regionOfInterest).distinctBy { it.raw }) {
                 if (b.raw.isEmpty()) continue
                 evidence.addBarcode(b)
             }
@@ -209,26 +136,18 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
                     settled = r
                     return ScanState.Finished(r)
                 }
-                // The code named a product not on file. That verdict is
-                // definitive, but the label still has to be read: those fields
-                // pre-fill the receive form, and stopping on the decode alone
-                // hands the user an empty card for a vial they must now type in.
-                if (r.verdict == Verdict.NOT_FOUND && harvestSatisfied(elapsed)) {
-                    settled = r
-                    return ScanState.Finished(r)
-                }
+
             }
         }
 
         // ---- Tier 2: OCR, half-res gray, sharpest frames only ---------------
         //
-        // Pacing and budget are checked *before* sharpness, because measuring
-        // sharpness costs real milliseconds and there is no reason to pay it on
-        // a frame that could not be OCR'd anyway.
+        // Pacing is checked *before* sharpness, because measuring sharpness
+        // costs real milliseconds and there is no reason to pay it on a frame
+        // that could not be OCR'd anyway.
         val paced = frame.timestamp - lastOCRTime >= ocrInterval
-        val budget = ocrFrames < ocrBudget
         var sharpEnough = true
-        if (paced && budget) {
+        if (paced) {
             val sharp = frame.sharpness
             recentSharpness.addLast(sharp)
             while (recentSharpness.size > config.sharpnessWindow) recentSharpness.removeFirst()
@@ -236,78 +155,36 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
             sharpEnough = bar == 0.0 || sharp >= bar * config.sharpnessRatio
         }
 
-        if (sharpEnough && paced && budget) {
+        if (sharpEnough && paced) {
             lastOCRTime = frame.timestamp
             val obs = frame.recognizeText(config.regionOfInterest)
                 .filter { it.confidence > 0.3f }
             latestTextBoxes = obs.mapNotNull { it.boundingBox }
-            // Charge the budget only for a pass that actually read something.
-            // `maxOCRFrames` is the reserve a hard-to-read label needs, and it
-            // used to be spent on whatever the camera happened to be pointed at
-            // first: a vial that read only `CATALOG=143302 VENDOR=BioLegend`
-            // came back NOT_FOUND having burned all 24 passes on bench, floor
-            // and glove. An empty pass still moves `lastOCRTime`, so it cannot
-            // flood, and still counts in `framesSeen`.
-            if (obs.isEmpty()) {
-                emptyOCRRun += 1
-            } else {
-                emptyOCRRun = 0
-                ocrFrames += 1
-            }
-            // The empty frame is still fed to the buffer. `addFrame` already
-            // refuses to count a frame that read nothing towards
-            // `framesSinceNewToken`, so this cannot fake saturation into
-            // triggering; dropping it would only desync `frameCount` (reported
-            // as `framesUsed`, and the "Line the label up" hint) from the passes
-            // that were actually run.
+            if (obs.isEmpty()) emptyOCRRun += 1
+            else { emptyOCRRun = 0; ocrFrames += 1 }
             evidence.addFrame(obs)
 
             if (ocrFrames >= config.earlyExitMinFrames &&
-                elapsed >= config.minScanDuration &&
-                coverageSatisfied
+                elapsed >= config.minScanDuration
             ) {
                 val r = matcher.resolve(evidence, EvidenceStandard.CORROBORATED)
-                if (catalogued(r) && confirmed(r)) {
-                    settled = r
-                    return ScanState.Finished(r)
+                if (catalogued(r)) {
+                    if (confirmed(r)) {
+                        settled = r
+                        return ScanState.Finished(r)
+                    }
+                } else {
+                    pendingIdentity = null
+                    pendingCount = 0
                 }
             }
-        }
-
-        if (elapsed >= deadline || elapsed >= config.hardScanCeiling) {
-            val r = matcher.resolve(evidence)
-            // Only stop on the deadline if there is something to stop *with*.
-            // SUFFICIENT means retrievable fields were read, not that they
-            // retrieved anything, so a non-answer still spends an extension:
-            // the rest of the label is hidden around the curve of the vial.
-            val answered = catalogued(r)
-            // Extend while the label is still yielding, not a fixed number of
-            // times. Counting attempts stops a vial mid-rotation; saturation
-            // asks whether more waiting can buy more evidence. See README
-            // "Two goals, opposite stopping rules".
-            val exhausted = harvestSatisfied(elapsed)
-            if (answered ||
-                exhausted ||
-                elapsed >= config.hardScanCeiling
-            ) {
-                settled = r
-                return ScanState.Finished(r)
-            }
-            val extension = minOf(config.graceExtension, config.hardScanCeiling - elapsed)
-            if (extension <= 0.0) {
-                settled = r
-                return ScanState.Finished(r)
-            }
-            extensionsGranted += 1
-            deadline = elapsed + extension
-            ocrBudget += config.ocrFramesPerExtension
         }
 
         return ScanState.Scanning(
             framesSeen = framesSeen, ocrFrames = ocrFrames,
             views = evidence.distinctViews,
             progress = progress(elapsed),
-            hint = hint(paced, budget, sharpEnough),
+            hint = hint(paced, sharpEnough),
             textBoxes = latestTextBoxes,
         )
     }
@@ -324,28 +201,12 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
             )
         }
 
-    /** Has the user shown more than one face of the label - or run the visible
-     *  face dry? */
-    private val coverageSatisfied: Boolean
-        get() = evidence.distinctViews >= config.minDistinctViews ||
-            evidence.framesSinceNewToken >= config.saturationFrames
-
-    /** A new or unresolved vial gets a real rotation window before repeated
-     * reads of one face can end the scan. New tokens reset saturation. */
-    private fun harvestSatisfied(elapsed: Double): Boolean =
-        elapsed >= maxOf(0.0, config.minHarvestDuration) &&
-            evidence.framesSinceNewToken >= config.saturationFrames
-
-    /** Only a catalogued identity may take the fast path. A known definition
-     * with a lot absent from inventory still needs the full harvest. */
-    private fun catalogued(result: ScanResult): Boolean =
-        result.evidenceLevel == EvidenceLevel.SUFFICIENT &&
-            (result.verdict == Verdict.CERTAIN || result.verdict == Verdict.CONFIDENT) &&
-            !result.lotNotOnRecord
+    /** Early exit means the inventory row is resolved, not just the product. */
+    private fun catalogued(result: ScanResult): Boolean = result.canAutoConfirm
 
     /** A verdict may only end the scan once it has come back `settleConfirmations`
      *  resolves running: one that flickers between two definitions is not an
-     *  answer, it is whichever was on top when the budget allowed a resolve. */
+     *  answer, it is whichever was on top when the pacing allowed a resolve. */
     private fun confirmed(r: ScanResult): Boolean {
         val id = listOf(
             r.verdict.name,
@@ -357,47 +218,13 @@ class ScanEngine(catalog: Catalog, val config: EngineConfig = EngineConfig()) {
         return pendingCount >= config.settleConfirmations
     }
 
-    /** Readiness to answer, averaged over the three things actually being waited
-     *  on. Deliberately not a frame counter: a bar that fills at a fixed rate
-     *  tells the user nothing about whether rotating more would help. */
-    private fun progress(elapsed: Double): Double {
-        val time = minOf(1.0, elapsed / maxOf(0.01, config.minScanDuration))
-        val passes = minOf(1.0, ocrFrames.toDouble() / maxOf(1, config.earlyExitMinFrames))
-        val coverage = if (coverageSatisfied) 1.0
-        else minOf(1.0, evidence.distinctViews.toDouble() / maxOf(1, config.minDistinctViews))
-        // Without this term the bar sits full through every granted extension,
-        // telling the user the scan is done while it waits for the one thing it
-        // still does not have.
-        val read = when (currentLevel) {
-            EvidenceLevel.NONE -> 0.0
-            EvidenceLevel.THIN -> 0.5
-            EvidenceLevel.SUFFICIENT -> 1.0
-        }
-        return (time + passes + coverage + read) / 4
-    }
+    /** Elapsed collection time, not a claim that the label is complete. */
+    private fun progress(elapsed: Double): Double = (elapsed / maxOf(0.01, deadline)).coerceIn(0.0, 1.0)
 
-    /** Evidence level as it stands, without running a full resolve. */
-    private val currentLevel: EvidenceLevel
-        get() {
-            val fields = LinkedHashMap<LabelField, String>()
-            for (f in LabelField.entries) {
-                evidence.vote(f, 2)?.let { fields[f] = it.first }
-            }
-            return Matcher.evidenceLevel(evidence, fields)
-        }
-
-    private fun hint(paced: Boolean, budget: Boolean, sharpEnough: Boolean): String {
-        if (paced && budget && !sharpEnough) return "Hold steady"
-        if (evidence.frameCount == 0) return "Line the label up"
-        // Past the first deadline the generic hints stop being useful: the scan
-        // is in extra time precisely because something specific is missing.
-        if (extensionsGranted > 0) {
-            return if (evidence.allTokens.isEmpty()) "Nothing readable yet - move closer, slower"
-            else "Still need the catalog number - keep turning"
-        }
-        if (!coverageSatisfied) return "Keep rotating"
-        if (evidence.vote(LabelField.CATALOG, 2) == null) return "Looking for the catalog number"
-        return "Reading label..."
+    private fun hint(paced: Boolean, sharpEnough: Boolean): String {
+        if (paced && !sharpEnough) return "Hold steady"
+        if (evidence.allTokens.isEmpty()) return "Line the label up"
+        return "Turn to show the rest, or tap Done"
     }
 
     /** Force a verdict from whatever evidence exists (user stopped rotating). */

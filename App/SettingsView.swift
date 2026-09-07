@@ -186,42 +186,12 @@ struct SettingsView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    settingLabel("Sides of the label to see",
-                                 "A verdict waits until this many distinctly different faces of the label have been read — the scanner's way of knowing the vial was actually turned. Drop to 1 if your labels say everything on one side.")
+                    settingLabel("Collection window",
+                                 "Stop earlier for a supported inventory match. Otherwise collect for this long, then review missing fields. Minimum 5 seconds.")
                     HStack {
-                        Slider(value: Binding(
-                            get: { Double(store.settings.minDistinctViews) },
-                            set: { store.settings.minDistinctViews = Int($0) }),
-                               in: 1...3, step: 1)
-                        .tint(Theme.accent)
-                        Text("\(store.settings.minDistinctViews)")
-                            .font(Theme.mono).foregroundStyle(Theme.textSecond)
-                            .frame(width: 50, alignment: .trailing)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    settingLabel("Give up after",
-                                 "A match resolves in about four OCR passes. Without a cap, failing takes longer than succeeding.")
-                    HStack {
-                        Slider(value: $store.settings.maxScanSeconds, in: 2...10, step: 0.5)
+                        Slider(value: $store.settings.maxScanSeconds, in: 5...15, step: 0.5)
                             .tint(Theme.accent)
                         Text(String(format: "%.1fs", store.settings.maxScanSeconds))
-                            .font(Theme.mono).foregroundStyle(Theme.textSecond)
-                            .frame(width: 50, alignment: .trailing)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    settingLabel("OCR passes at most",
-                                 "Each pass costs about 50 ms of one background thread.")
-                    HStack {
-                        Slider(value: Binding(
-                            get: { Double(store.settings.maxOCRFrames) },
-                            set: { store.settings.maxOCRFrames = Int($0) }),
-                               in: 6...40, step: 1)
-                        .tint(Theme.accent)
-                        Text("\(store.settings.maxOCRFrames)")
                             .font(Theme.mono).foregroundStyle(Theme.textSecond)
                             .frame(width: 50, alignment: .trailing)
                     }
