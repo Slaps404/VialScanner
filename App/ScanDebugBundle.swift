@@ -116,7 +116,6 @@ struct DebugTraceFrame: Codable, Equatable {
 struct DebugEngineConfig: Codable, Equatable {
     let regionOfInterest: DebugRect?
     let barcodeEveryNthFrame: Int
-    let maxOCRFrames: Int
     let minOCRInterval: Double
     let emptyOCRFramesBeforeBackoff: Int
     let ocrBackoffFactor: Double
@@ -128,18 +127,13 @@ struct DebugEngineConfig: Codable, Equatable {
     let earlyExitMinFrames: Int
     let minScanDuration: Double
     let barcodeConfirmations: Int
-    let minDistinctViews: Int
-    let saturationFrames: Int
     let settleConfirmations: Int
     let maxScanDuration: Double
-    let graceExtension: Double
     let hardScanCeiling: Double
-    let ocrFramesPerExtension: Int
 
     init(_ config: EngineConfig) {
         regionOfInterest = config.regionOfInterest.map(DebugRect.init)
         barcodeEveryNthFrame = config.barcodeEveryNthFrame
-        maxOCRFrames = config.maxOCRFrames
         minOCRInterval = config.minOCRInterval
         emptyOCRFramesBeforeBackoff = config.emptyOCRFramesBeforeBackoff
         ocrBackoffFactor = config.ocrBackoffFactor
@@ -151,13 +145,9 @@ struct DebugEngineConfig: Codable, Equatable {
         earlyExitMinFrames = config.earlyExitMinFrames
         minScanDuration = config.minScanDuration
         barcodeConfirmations = config.barcodeConfirmations
-        minDistinctViews = config.minDistinctViews
-        saturationFrames = config.saturationFrames
         settleConfirmations = config.settleConfirmations
         maxScanDuration = config.maxScanDuration
-        graceExtension = config.graceExtension
         hardScanCeiling = config.hardScanCeiling
-        ocrFramesPerExtension = config.ocrFramesPerExtension
     }
 }
 

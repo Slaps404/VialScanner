@@ -88,7 +88,6 @@ struct RootView: View {
         }
         .onChange(of: store.catalog.items.count) { _, _ in syncEngine() }
         .onChange(of: store.catalog.definitions.count) { _, _ in syncEngine() }
-        .onChange(of: store.settings.maxOCRFrames) { _, _ in syncEngine() }
         .onChange(of: store.settings.maxScanSeconds) { _, _ in syncEngine() }
         .onChange(of: store.settings.roiInset) { _, _ in syncEngine() }
         .onChange(of: store.settings.haptics) { _, on in Haptics.enabled = on }

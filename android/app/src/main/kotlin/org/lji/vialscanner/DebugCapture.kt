@@ -45,6 +45,13 @@ data class DebugBundle(
     val groundTruth: DebugGroundTruth? = null,
     val result: DebugResult? = null,
     val frames: List<DebugFrameTrace> = emptyList(),
+    val artifacts: DebugArtifacts = DebugArtifacts(),
+)
+
+@Serializable
+data class DebugArtifacts(
+    /** Relative to the directory containing bundle.json. */
+    val video: String? = null,
 )
 
 @Serializable
@@ -75,10 +82,8 @@ data class DebugCatalogMetadata(
 @Serializable
 data class DebugConfigMetadata(
     val mode: DebugCaptureMode,
-    val maxOCRFrames: Int,
     val minScanSeconds: Double,
     val maxScanSeconds: Double,
-    val minDistinctViews: Int,
     val roiInset: Double,
     val barcodeEveryNthFrame: Int,
     val minOCRInterval: Double,
@@ -198,6 +203,8 @@ data class DebugResult(
     val barcode: BarcodeMetadata? = null,
     val framesUsed: Int,
     val lotNotOnRecord: Boolean,
+    val canAutoConfirm: Boolean = false,
+    val evidenceStandard: String = "BEST",
 )
 
 /** Input from one `MlKitFrame` after the synchronous engine pass returns. */
@@ -247,6 +254,7 @@ private data class SessionSnapshot(
     val result: DebugResult?,
     val frames: List<PendingFrame>,
     val bundleFile: File,
+    val videoFile: String?,
 )
 
 private class DebugSession(
@@ -268,6 +276,7 @@ private class DebugSession(
     var opticsLast: DebugOpticsSample? = null
     var groundTruth: DebugGroundTruth? = null
     var result: DebugResult? = null
+    var videoFile: String? = null
 }
 
 private data class ThermalSample(val status: Int?, val label: String?)
@@ -320,7 +329,7 @@ class DebugCapture(private val context: Context) {
             applicationID = BuildConfig.APPLICATION_ID,
             appVersion = BuildConfig.VERSION_NAME,
             versionCode = BuildConfig.VERSION_CODE,
-            buildID = "${BuildConfig.APPLICATION_ID}:${BuildConfig.VERSION_NAME}:${BuildConfig.VERSION_CODE}",
+            buildID = "${BuildConfig.APPLICATION_ID}:${BuildConfig.VERSION_NAME}:${BuildConfig.VERSION_CODE}:${BuildConfig.SOURCE_ID}",
         )
         val device = DebugDeviceMetadata(
             manufacturer = Build.MANUFACTURER ?: "",
@@ -340,10 +349,8 @@ class DebugCapture(private val context: Context) {
             ),
             config = DebugConfigMetadata(
                 mode = mode,
-                maxOCRFrames = config.maxOCRFrames,
                 minScanSeconds = config.minScanDuration,
                 maxScanSeconds = config.maxScanDuration,
-                minDistinctViews = config.minDistinctViews,
                 roiInset = store.settings.roiInset,
                 barcodeEveryNthFrame = config.barcodeEveryNthFrame,
                 minOCRInterval = config.minOCRInterval,
@@ -421,14 +428,24 @@ class DebugCapture(private val context: Context) {
     }
 
     @Synchronized
-    fun finish(result: ScanResult): File? {
-        val s = session ?: return currentBundleFile
-        if (s.status != "running") return s.bundleFile
+    fun finish(
+        result: ScanResult,
+        sourceVideo: File? = null,
+        onVideoPackaged: ((Boolean) -> Unit)? = null,
+    ): File? {
+        val s = session ?: run {
+            onVideoPackaged?.invoke(false)
+            return currentBundleFile
+        }
+        if (s.status != "running") {
+            onVideoPackaged?.invoke(false)
+            return s.bundleFile
+        }
         s.status = "finished"
         s.endedAtEpochMs = System.currentTimeMillis()
         s.thermalEnd = thermalSample()
         s.result = result.toDebugResult()
-        enqueue(snapshot(s))
+        enqueue(snapshot(s), sourceVideo, onVideoPackaged)
         return s.bundleFile
     }
 
@@ -473,11 +490,41 @@ class DebugCapture(private val context: Context) {
         result = s.result,
         frames = s.frames.toList(),
         bundleFile = s.bundleFile,
+        videoFile = s.videoFile,
     )
 
-    private fun enqueue(snapshot: SessionSnapshot) {
-        writer.execute { writeSnapshot(snapshot) }
+    private fun enqueue(
+        snapshot: SessionSnapshot,
+        sourceVideo: File? = null,
+        onVideoPackaged: ((Boolean) -> Unit)? = null,
+    ) {
+        writer.execute {
+            val packaged = if (sourceVideo == null) false else packageVideo(snapshot, sourceVideo)
+            val ready = if (packaged) snapshot.copy(videoFile = VIDEO_FILE) else snapshot
+            if (sourceVideo != null) {
+                synchronized(this) {
+                    session?.takeIf { it.id == snapshot.id }?.videoFile = ready.videoFile
+                }
+                onVideoPackaged?.invoke(packaged)
+            }
+            writeSnapshot(ready)
+        }
     }
+
+    /** Copy before exposing the result card, so a quick action cannot move the source first. */
+    private fun packageVideo(snapshot: SessionSnapshot, source: File): Boolean = runCatching {
+        val dir = snapshot.bundleFile.parentFile ?: return@runCatching false
+        dir.mkdirs()
+        val target = File(dir, VIDEO_FILE)
+        val partial = File(dir, "$VIDEO_FILE.tmp")
+        partial.delete()
+        source.copyTo(partial, overwrite = true)
+        if (!partial.renameTo(target)) {
+            partial.copyTo(target, overwrite = true)
+            partial.delete()
+        }
+        target.isFile && target.length() == source.length()
+    }.getOrDefault(false)
 
     private fun writeSnapshot(s: SessionSnapshot) {
         runCatching {
@@ -513,6 +560,7 @@ class DebugCapture(private val context: Context) {
                 groundTruth = s.groundTruth,
                 result = s.result,
                 frames = traces,
+                artifacts = DebugArtifacts(video = s.videoFile),
             )
             val text = json.encodeToString(bundle)
             val tmp = File(dir, "bundle.json.tmp")
@@ -532,6 +580,8 @@ class DebugCapture(private val context: Context) {
     }
 
     companion object {
+        private const val VIDEO_FILE = "scan.mp4"
+
         private fun thermalLabel(status: Int?): String? = when (status) {
             null -> null
             PowerManager.THERMAL_STATUS_NONE -> "none"
@@ -594,6 +644,8 @@ class DebugCapture(private val context: Context) {
             barcode = barcode?.let { BarcodeMetadata(it.raw, it.symbology, it.catalog, it.lot) },
             framesUsed = framesUsed,
             lotNotOnRecord = lotNotOnRecord,
+            canAutoConfirm = canAutoConfirm,
+            evidenceStandard = evidenceStandard.name,
         )
     }
 }

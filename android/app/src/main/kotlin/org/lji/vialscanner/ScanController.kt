@@ -626,15 +626,25 @@ class ScanController(private val store: AppStore, context: Context) {
      * on disk yet is a promise the app cannot keep.
      */
     private fun deliverFinished(result: ScanResult) {
-        debugCapture.finish(result)
         if (!recordingClip) {
+            debugCapture.finish(result)
             state = ScanState.Finished(result)
             return
         }
         recordingClip = false
         clipRecorder.finish { file ->
-            pendingClip = file
-            state = ScanState.Finished(result)
+            if (file == null) {
+                debugCapture.finish(result)
+                state = ScanState.Finished(result)
+                return@finish
+            }
+            debugCapture.finish(result, file) { packaged ->
+                if (!packaged) Log.w("ScanController", "Could not package scan video in debug bundle")
+                main.post {
+                    pendingClip = file
+                    state = ScanState.Finished(result)
+                }
+            }
         }
     }
 
