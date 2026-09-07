@@ -365,6 +365,24 @@ class ScanLabReviewTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["scans"][0]["layer"], "extraction")
 
+    def test_cancelled_capture_is_skipped_not_counted_as_broken(self) -> None:
+        """A scan the operator aborted never produced evidence to judge."""
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            root = Path(directory) / "tray"
+            root.mkdir()
+            shutil.copytree(FIXTURES / "pixel-cancelled", root / "pixel-cancelled")
+            shutil.copytree(FIXTURES / "ios-known", root / "ios-known")
+            result = self.run_review(root, "--json")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["counts"]["cancelled"], 1)
+            self.assertEqual(payload["counts"]["invalid"], 0)
+            self.assertEqual(payload["failureModes"], [])
+            rendered = self.run_review(root)
+            self.assertIn("SKIP", rendered.stdout)
+            self.assertIn("cancelled", rendered.stdout)
+
     def test_review_json_ranks_failure_modes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
             result = self.run_review(self.mixed_tray(directory), "--json")

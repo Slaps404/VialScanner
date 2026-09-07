@@ -252,9 +252,15 @@ to fix first instead of leaving it to be inferred from thirty separate reports.
 `--only-fail` hides passing scans and `--json` emits the same result with per
 scan issues and a ranked `failureModes` array.
 
-`NOTE?` rows are scans with no expectation in the note. They are listed so a
-forgotten annotation is visible, but they do not count as failures and do not
-affect the exit code. `review` exits `1` when any annotated scan is
+Two row kinds are listed but never counted as failures, because neither is a
+scanner result:
+
+- `NOTE?` is a scan with no expectation in the note, so there is nothing to
+  judge it against. Listed so a forgotten annotation stays visible.
+- `SKIP` is a capture that never finished: an aborted scan, or one that
+  recorded no frames. A tray pulled off a phone normally contains a few.
+
+`review` exits `1` only when an annotated, finished scan comes back
 `wrong_result`, `unresolved`, or `invalid`.
 
 Two rules follow from the ground-truth contract above:

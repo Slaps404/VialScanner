@@ -1618,7 +1618,27 @@ def translate_native(path: Path, out: Path) -> Path:
 
 # --- Batch review -------------------------------------------------------------
 
-REVIEW_OUTCOMES = ("correct", "wrong_result", "unresolved", "invalid", "unannotated")
+REVIEW_OUTCOMES = ("correct", "wrong_result", "unresolved", "invalid", "unannotated", "cancelled")
+
+# Outcomes that are not a scanner failure: nothing to judge, so they neither
+# rank as a failure mode nor set the exit code.
+REVIEW_NOT_FAILURES = {"correct", "unannotated", "cancelled"}
+
+
+def native_incomplete(document: Mapping[str, Any]) -> str | None:
+    """Why this native bundle holds no scan to judge, or None if it does.
+
+    A tray pulled off a phone contains aborted scans. They are evidence of
+    nothing and must not be reported as broken bundles.
+    """
+    scan = document.get("scan") if isinstance(document.get("scan"), Mapping) else {}
+    status = scan.get("status")
+    if isinstance(status, str) and status != "finished":
+        return status
+    frames = document.get("frames") if "frames" in document else document.get("trace")
+    if not isinstance(frames, list) or not frames:
+        return "no frames captured"
+    return None
 
 
 def find_review_targets(root: Path) -> list[tuple[str, Path]]:
@@ -1648,6 +1668,14 @@ def review_row(kind: str, path: Path, work: Path, index: int) -> dict[str, Any]:
         report = validate_bundle(path)
     else:
         try:
+            document = read_native(path)[1]
+            reason = native_incomplete(document)
+            if reason is not None:
+                scan = document.get("scan") if isinstance(document.get("scan"), Mapping) else {}
+                return {"path": str(path), "bundleId": scan.get("id") or path.name,
+                        "platform": "android" if "frames" in document else "ios",
+                        "goal": "unknown", "outcome": "cancelled", "layer": None,
+                        "note": reason, "mismatches": [], "issues": []}
             bundle = translate_native(path, work / f"{index:04d}")
         except ScanLabError as exc:
             return {"path": str(path), "bundleId": path.name, "platform": "unknown", "goal": "unknown",
@@ -1688,7 +1716,7 @@ def review_corpus(root: Path) -> dict[str, Any]:
                 modes[key] = modes.get(key, 0) + 1
     failure_modes = [{"layer": layer, "code": code, "count": count}
                      for (layer, code), count in sorted(modes.items(), key=lambda kv: (-kv[1], kv[0]))]
-    ok = not any(scan["outcome"] not in {"correct", "unannotated"} for scan in scans)
+    ok = not any(scan["outcome"] not in REVIEW_NOT_FAILURES for scan in scans)
     return {"ok": ok, "root": str(root), "counts": counts, "scans": scans, "failureModes": failure_modes}
 
 
@@ -1697,11 +1725,11 @@ def render_review(result: Mapping[str, Any], only_fail: bool = False) -> str:
     lines = [f"ScanLab review {'PASS' if result['ok'] else 'FAIL'}: {len(result['scans'])} scans "
              f"({counts['correct']} correct, {counts['wrong_result']} wrong_result, "
              f"{counts['unresolved']} unresolved, {counts['invalid']} invalid, "
-             f"{counts['unannotated']} unannotated)", ""]
-    labels = {"correct": "PASS", "unannotated": "NOTE?"}
+             f"{counts['unannotated']} unannotated, {counts['cancelled']} cancelled)", ""]
+    labels = {"correct": "PASS", "unannotated": "NOTE?", "cancelled": "SKIP"}
     shown = 0
     for scan in result["scans"]:
-        if only_fail and scan["outcome"] in {"correct", "unannotated"}:
+        if only_fail and scan["outcome"] in REVIEW_NOT_FAILURES:
             continue
         shown += 1
         note = scan["note"].strip().replace("\n", " ")
@@ -1716,7 +1744,10 @@ def render_review(result: Mapping[str, Any], only_fail: bool = False) -> str:
     if counts["unannotated"]:
         lines.extend(["", "NOTE? scans carry no expectation. Add cat=/lot=/expect= in the app's "
                       "clip note field so they can be judged."])
-    lines.extend(["", "Next: fix the top layer, then rerun this command on the same directory."])
+    if result["failureModes"]:
+        lines.extend(["", "Next: fix the top layer, then rerun this command on the same directory."])
+    else:
+        lines.extend(["", "Next: nothing failing. Annotated scans all agree with their notes."])
     return "\n".join(lines)
 
 
