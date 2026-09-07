@@ -57,7 +57,12 @@ class ScanResult(
     val framesUsed: Int,
     /** What the camera actually got, as distinct from what the matcher decided. */
     val evidenceLevel: EvidenceLevel,
+    val evidenceStandard: EvidenceStandard = EvidenceStandard.BEST,
 ) {
+    /** Repeated evidence and a unique inventory row are required for automatic writes. */
+    val canAutoConfirm: Boolean get() = evidenceStandard == EvidenceStandard.CORROBORATED &&
+        isHit && vial != null && !lotNotOnRecord
+
     val isHit: Boolean get() = verdict == Verdict.CERTAIN || verdict == Verdict.CONFIDENT
 
     /** Nothing was read at all. Not a result about a vial - a failed scan. */
@@ -117,6 +122,15 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
             ev.vote(f, standard.minFrames(f))?.let { fields[f] = it.first }
         }
 
+        val codes = ev.barcodes.filter { it.catalog != null && ev.frames(it) >= standard.minBarcodeFrames }
+        if (codes.map { it.catalog to it.lot }.distinct().size > 1) {
+            return ScanResult(
+                verdict = Verdict.AMBIGUOUS, definition = null, vial = null, otherVials = emptyList(),
+                score = 0.0, margin = 0.0, reasons = listOf("Conflicting barcodes: isolate one vial and rescan"),
+                lotNotOnRecord = false, fields = fields, barcode = null, framesUsed = ev.frameCount,
+                evidenceLevel = EvidenceLevel.SUFFICIENT, evidenceStandard = standard,
+            )
+        }
         // ---- Tier 1: barcode ------------------------------------------------
         for (bc in ev.barcodes) {
             // One decode is one glimpse, and a DataMatrix in the tray behind the
@@ -130,6 +144,14 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
             bc.lot?.takeIf { it.isNotEmpty() }?.let { fields[LabelField.LOT] = it }
             val level = evidenceLevel(ev, fields)
             val hits = catalog.definitionIndices(cat)
+            if (hits.size > 1) {
+                return ScanResult(
+                    verdict = Verdict.AMBIGUOUS, definition = null, vial = null, otherVials = emptyList(),
+                    score = 0.0, margin = 0.0, reasons = listOf("Barcode catalog identifies multiple definitions"),
+                    lotNotOnRecord = false, fields = fields, barcode = bc,
+                    framesUsed = ev.frameCount, evidenceLevel = level, evidenceStandard = standard,
+                )
+            }
             val idx = hits.firstOrNull()
             if (idx != null) {
                 val def = catalog.definitions[idx]
@@ -142,7 +164,7 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
                             (bc.lot?.let { ", lot $it" } ?: "")
                     ),
                     lotNotOnRecord = lotMiss, fields = fields, barcode = bc,
-                    framesUsed = ev.frameCount, evidenceLevel = level,
+                    framesUsed = ev.frameCount, evidenceLevel = level, evidenceStandard = standard,
                 )
             }
             // Decoded cleanly but absent from the catalog: a definitive "new
@@ -152,7 +174,7 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
                 score = 0.0, margin = 0.0,
                 reasons = listOf("barcode ${bc.symbology} decoded catalog $cat - not in catalog"),
                 lotNotOnRecord = false, fields = fields, barcode = bc,
-                framesUsed = ev.frameCount, evidenceLevel = level,
+                framesUsed = ev.frameCount, evidenceLevel = level, evidenceStandard = standard,
             )
         }
 
@@ -169,7 +191,7 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
                     score = 50.0, margin = 50.0,
                     reasons = listOf("catalog # $cat matched exactly"),
                     lotNotOnRecord = lotMiss, fields = fields, barcode = null,
-                    framesUsed = ev.frameCount, evidenceLevel = level,
+                    framesUsed = ev.frameCount, evidenceLevel = level, evidenceStandard = standard,
                 )
             }
         }
@@ -185,7 +207,7 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
         // false negative merely costs a manual lookup.
         val cat = fields[LabelField.CATALOG]
         val nearIdx = cat?.let { catalog.definitionIndexNearCatalog(it) }
-        if (cat != null && nearIdx != null && corroborates(catalog.definitions[nearIdx], ev)) {
+        if (cat != null && nearIdx != null && corroborates(catalog.definitions[nearIdx], ev, standard)) {
             val def = catalog.definitions[nearIdx]
 
             // Where the edit falls decides what it means. Vendors encode pack
@@ -211,7 +233,7 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
                             "same clone, but the trailing digit usually encodes pack size"
                     ),
                     lotNotOnRecord = false, fields = fields, barcode = null,
-                    framesUsed = ev.frameCount, evidenceLevel = level,
+                    framesUsed = ev.frameCount, evidenceLevel = level, evidenceStandard = standard,
                 )
             }
 
@@ -221,13 +243,13 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
                 score = 40.0, margin = 40.0,
                 reasons = listOf("catalog # $cat -> ${def.catalog} (unique single-edit match)"),
                 lotNotOnRecord = lotMiss, fields = fields, barcode = null,
-                framesUsed = ev.frameCount, evidenceLevel = level,
+                framesUsed = ev.frameCount, evidenceLevel = level, evidenceStandard = standard,
             )
         }
 
         // ---- Tier 3: weighted fuzzy scoring over the stable token bag -------
         val stable = ev.stableTokens(2)
-        val tokens = if (stable.size >= 8) stable else ev.allTokens
+        val tokens = if (standard == EvidenceStandard.CORROBORATED || stable.size >= 8) stable else ev.allTokens
         val folded = tokens.mapTo(HashSet()) { ocrFold(it) }
         val hay = fuzzyHay(tokens)
 
@@ -278,7 +300,7 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
                 verdict = Verdict.NOT_FOUND, definition = null, vial = null, otherVials = emptyList(),
                 score = 0.0, margin = 0.0, reasons = listOf("no catalog evidence"),
                 lotNotOnRecord = false, fields = fields, barcode = null,
-                framesUsed = ev.frameCount, evidenceLevel = level,
+                framesUsed = ev.frameCount, evidenceLevel = level, evidenceStandard = standard,
             )
 
         val runnerUp = ranked.getOrNull(1)?.score ?: 0.0
@@ -301,13 +323,13 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
             vial = picked.first, otherVials = picked.second,
             score = top.score, margin = margin, reasons = top.reasons,
             lotNotOnRecord = picked.third, fields = fields, barcode = null,
-            framesUsed = ev.frameCount, evidenceLevel = level,
+            framesUsed = ev.frameCount, evidenceLevel = level, evidenceStandard = standard,
         )
     }
 
     /** Independent support for a candidate from product-identifying fields. */
-    private fun corroborates(def: AntibodyDefinition, ev: EvidenceBuffer): Boolean {
-        val tokens = ev.allTokens
+    private fun corroborates(def: AntibodyDefinition, ev: EvidenceBuffer, standard: EvidenceStandard): Boolean {
+        val tokens = if (standard == EvidenceStandard.CORROBORATED) ev.stableTokens(2) else ev.allTokens
         val folded = tokens.mapTo(HashSet()) { ocrFold(it) }
         val hay = fuzzyHay(tokens)
         for (value in listOf(def.clone, def.target)) {
@@ -323,39 +345,17 @@ class Matcher(val catalog: Catalog, val config: MatchConfig = MatchConfig()) {
         return false
     }
 
-    /**
-     * Choose the vial. The definition link is authoritative; lot only breaks ties
-     * *within* that set. A bad lot read can never suppress a real vial.
-     */
-    private fun pickVial(
-        def: AntibodyDefinition,
-        lot: String?,
-    ): Triple<InventoryItem?, List<InventoryItem>, Boolean> {
+    /** Product and batch identify an inventory row only when the batch is unique. */
+    private fun pickVial(def: AntibodyDefinition, lot: String?): Triple<InventoryItem?, List<InventoryItem>, Boolean> {
         val candidates = catalog.inventoryFor(def)
         if (candidates.isEmpty()) return Triple(null, emptyList(), false)
-
-        if (!lot.isNullOrEmpty()) {
-            val want = ocrFold(lot)
-            val exact = candidates.firstOrNull { ocrFold(it.lot) == want }
-            if (exact != null) {
-                return Triple(exact, candidates.filter { it.abNo != exact.abNo }, false)
-            }
-            val near = candidates
-                .map { it to similarity(ocrFold(it.lot), want) }
-                .filter { it.second >= 0.8 }
-                .maxByOrNull { it.second }?.first
-            if (near != null) {
-                return Triple(near, candidates.filter { it.abNo != near.abNo }, false)
-            }
-            // The lot read cleanly and matches nothing on record. Reporting one
-            // of the existing vials here would be a lie: this is a new lot of a
-            // known antibody, and naming a vial invites someone to draw from the
-            // wrong one.
-            return Triple(null, candidates, true)
-        }
-
-        if (candidates.size == 1) return Triple(candidates[0], emptyList(), false)
-        return Triple(candidates[0], candidates.drop(1), false)
+        if (lot.isNullOrEmpty()) return Triple(null, candidates, false)
+        val exact = candidates.filter { it.lot.trim().uppercase() == lot.trim().uppercase() }
+        if (exact.size == 1) return Triple(exact[0], candidates.filter { it.abNo != exact[0].abNo }, false)
+        if (exact.isNotEmpty()) return Triple(null, exact, false)
+        // Similar text is a reason to review, never a reason to select a batch.
+        val plausible = candidates.any { similarity(ocrFold(it.lot), ocrFold(lot)) >= 0.8 }
+        return Triple(null, candidates, !plausible)
     }
 
     companion object {

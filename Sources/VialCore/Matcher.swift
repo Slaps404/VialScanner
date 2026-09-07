@@ -51,6 +51,12 @@ public struct ScanResult: Sendable {
     public let framesUsed: Int
     /// What the camera actually got, as distinct from what the matcher decided.
     public let evidenceLevel: EvidenceLevel
+    public var evidenceStandard: EvidenceStandard = .best
+
+    /// Automatic inventory writes need repeated evidence and an unambiguous row.
+    public var canAutoConfirm: Bool {
+        evidenceStandard == .corroborated && isHit && vial != nil && !lotNotOnRecord
+    }
 
     public var isHit: Bool { verdict == .certain || verdict == .confident }
     /// Nothing was read at all. Not a result about a vial — a failed scan.
@@ -114,6 +120,14 @@ public struct Matcher: Sendable {
         for f in LabelField.allCases {
             if let v = ev.vote(f, minFrames: standard.minFrames(for: f)) { fields[f] = v.value }
         }
+        let codes = ev.barcodes.filter { $0.catalog != nil && ev.frames(for: $0) >= standard.minBarcodeFrames }
+        let identities = Set(codes.map { "\($0.catalog ?? "")|\($0.lot ?? "")" })
+        if identities.count > 1 {
+            return ScanResult(verdict: .ambiguous, definition: nil, vial: nil, otherVials: [],
+                              score: 0, margin: 0, reasons: ["Conflicting barcodes: isolate one vial and rescan"],
+                              lotNotOnRecord: false, fields: fields, barcode: nil, framesUsed: ev.frameCount,
+                              evidenceLevel: .sufficient, evidenceStandard: standard)
+        }
         // ---- Tier 1: barcode ------------------------------------------------
         for bc in ev.barcodes {
             // One decode is one glimpse, and a DataMatrix in the tray behind the
@@ -127,6 +141,13 @@ public struct Matcher: Sendable {
             if let lot = bc.lot, !lot.isEmpty { fields[.lot] = lot }
             let level = Self.evidenceLevel(ev, fields: fields)
             let hits = catalog.definitionIndices(forCatalog: cat)
+            if hits.count > 1 {
+                return ScanResult(
+                    verdict: .ambiguous, definition: nil, vial: nil, otherVials: [],
+                    score: 0, margin: 0, reasons: ["Barcode catalog identifies multiple definitions"],
+                    lotNotOnRecord: false, fields: fields, barcode: bc,
+                    framesUsed: ev.frameCount, evidenceLevel: level, evidenceStandard: standard)
+            }
             if let idx = hits.first {
                 let def = catalog.definitions[idx]
                 let (vial, others, lotMiss) = pickVial(def: def, lot: bc.lot ?? fields[.lot])
@@ -135,7 +156,7 @@ public struct Matcher: Sendable {
                     score: 100, margin: 100,
                     reasons: ["barcode \(bc.symbology): catalog \(cat)"
                               + (bc.lot.map { ", lot \($0)" } ?? "")], lotNotOnRecord: lotMiss,
-                    fields: fields, barcode: bc, framesUsed: ev.frameCount, evidenceLevel: level)
+                    fields: fields, barcode: bc, framesUsed: ev.frameCount, evidenceLevel: level, evidenceStandard: standard)
             }
             // Decoded cleanly but absent from the catalog: a definitive "new vial",
             // not an ambiguous read. Do not fall through to fuzzy text matching.
@@ -143,7 +164,7 @@ public struct Matcher: Sendable {
                 verdict: .notFound, definition: nil, vial: nil, otherVials: [],
                 score: 0, margin: 0,
                 reasons: ["barcode \(bc.symbology) decoded catalog \(cat) — not in catalog"], lotNotOnRecord: false,
-                fields: fields, barcode: bc, framesUsed: ev.frameCount, evidenceLevel: level)
+                fields: fields, barcode: bc, framesUsed: ev.frameCount, evidenceLevel: level, evidenceStandard: standard)
         }
 
         let level = Self.evidenceLevel(ev, fields: fields)
@@ -158,7 +179,7 @@ public struct Matcher: Sendable {
                     verdict: .confident, definition: def, vial: vial, otherVials: others,
                     score: 50, margin: 50,
                     reasons: ["catalog # \(cat) matched exactly"], lotNotOnRecord: lotMiss,
-                    fields: fields, barcode: nil, framesUsed: ev.frameCount, evidenceLevel: level)
+                    fields: fields, barcode: nil, framesUsed: ev.frameCount, evidenceLevel: level, evidenceStandard: standard)
             }
         }
 
@@ -172,7 +193,7 @@ public struct Matcher: Sendable {
         // shares it. A false positive here puts the wrong antibody in a panel;
         // a false negative merely costs a manual lookup.
         if let cat = fields[.catalog], let idx = catalog.definitionIndex(nearCatalog: cat),
-           corroborates(catalog.definitions[idx], ev) {
+           corroborates(catalog.definitions[idx], ev, standard: standard) {
             let def = catalog.definitions[idx]
 
             // Where the edit falls decides what it means. Vendors encode pack size
@@ -192,7 +213,7 @@ public struct Matcher: Sendable {
                     reasons: ["read catalog # \(cat), closest on file is \(def.catalog) — "
                               + "same clone, but the trailing digit usually encodes pack size"],
                     lotNotOnRecord: false,
-                    fields: fields, barcode: nil, framesUsed: ev.frameCount, evidenceLevel: level)
+                    fields: fields, barcode: nil, framesUsed: ev.frameCount, evidenceLevel: level, evidenceStandard: standard)
             }
 
             let (vial, others, lotMiss) = pickVial(def: def, lot: fields[.lot])
@@ -200,12 +221,12 @@ public struct Matcher: Sendable {
                 verdict: .confident, definition: def, vial: vial, otherVials: others,
                 score: 40, margin: 40,
                 reasons: ["catalog # \(cat) -> \(def.catalog) (unique single-edit match)"], lotNotOnRecord: lotMiss,
-                fields: fields, barcode: nil, framesUsed: ev.frameCount, evidenceLevel: level)
+                fields: fields, barcode: nil, framesUsed: ev.frameCount, evidenceLevel: level, evidenceStandard: standard)
         }
 
         // ---- Tier 3: weighted fuzzy scoring over the stable token bag -------
         let stable = ev.stableTokens(minFrames: 2)
-        let tokens = stable.count >= 8 ? stable : ev.allTokens
+        let tokens = standard == .corroborated || stable.count >= 8 ? stable : ev.allTokens
         let folded = Set(tokens.map(ocrFold))
         let hay = fuzzyHay(tokens)
 
@@ -234,7 +255,7 @@ public struct Matcher: Sendable {
         guard let top = ranked.first else {
             return ScanResult(verdict: .notFound, definition: nil, vial: nil, otherVials: [],
                               score: 0, margin: 0, reasons: ["no catalog evidence"], lotNotOnRecord: false,
-                              fields: fields, barcode: nil, framesUsed: ev.frameCount, evidenceLevel: level)
+                              fields: fields, barcode: nil, framesUsed: ev.frameCount, evidenceLevel: level, evidenceStandard: standard)
         }
         let runnerUp = ranked.dropFirst().first?.score ?? 0
         let margin = top.score - runnerUp
@@ -251,7 +272,7 @@ public struct Matcher: Sendable {
             definition: verdict == .notFound ? nil : top.definition,
             vial: vial, otherVials: others,
             score: top.score, margin: margin, reasons: top.reasons, lotNotOnRecord: lotMiss,
-            fields: fields, barcode: nil, framesUsed: ev.frameCount, evidenceLevel: level)
+            fields: fields, barcode: nil, framesUsed: ev.frameCount, evidenceLevel: level, evidenceStandard: standard)
     }
 
     /// What the scan actually recovered.
@@ -271,8 +292,8 @@ public struct Matcher: Sendable {
     }
 
     /// Independent support for a candidate from product-identifying fields.
-    private func corroborates(_ def: AntibodyDefinition, _ ev: EvidenceBuffer) -> Bool {
-        let tokens = ev.allTokens
+    private func corroborates(_ def: AntibodyDefinition, _ ev: EvidenceBuffer, standard: EvidenceStandard) -> Bool {
+        let tokens = standard == .corroborated ? ev.stableTokens(minFrames: 2) : ev.allTokens
         let folded = Set(tokens.map(ocrFold))
         let hay = fuzzyHay(tokens)
         for value in [def.clone, def.target] {
@@ -287,31 +308,22 @@ public struct Matcher: Sendable {
         return false
     }
 
-    /// Choose the vial. The definition link is authoritative; lot only breaks
-    /// ties *within* that set. A bad lot read can never suppress a real vial.
+    /// Product and batch identify an inventory row only when the batch is unique.
     private func pickVial(def: AntibodyDefinition, lot: String?) -> (InventoryItem?, [InventoryItem], Bool) {
         let candidates = catalog.inventory(for: def)
         guard !candidates.isEmpty else { return (nil, [], false) }
-
-        if let lot, !lot.isEmpty {
-            let want = ocrFold(lot)
-            if let exact = candidates.first(where: { ocrFold($0.lot) == want }) {
-                return (exact, candidates.filter { $0.abNo != exact.abNo }, false)
-            }
-            if let near = candidates
-                .map({ ($0, similarity(ocrFold($0.lot), want)) })
-                .filter({ $0.1 >= 0.8 })
-                .max(by: { $0.1 < $1.1 })?.0 {
-                return (near, candidates.filter { $0.abNo != near.abNo }, false)
-            }
-            // The lot read cleanly and matches nothing on record. Reporting one of
-            // the existing vials here would be a lie: this is a new lot of a known
-            // antibody, and naming a vial invites someone to draw from the wrong one.
-            return (nil, candidates, true)
+        guard let lot, !lot.isEmpty else { return (nil, candidates, false) }
+        let want = lot.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let exact = candidates.filter {
+            $0.lot.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == want
         }
-
-        if candidates.count == 1 { return (candidates[0], [], false) }
-        return (candidates[0], Array(candidates.dropFirst()), false)
+        if exact.count == 1 {
+            return (exact[0], candidates.filter { $0.abNo != exact[0].abNo }, false)
+        }
+        if !exact.isEmpty { return (nil, exact, false) }
+        // Similar text is a reason to review, never a reason to select a batch.
+        let plausible = candidates.contains { similarity(ocrFold($0.lot), ocrFold(lot)) >= 0.8 }
+        return (nil, candidates, !plausible)
     }
 }
 
