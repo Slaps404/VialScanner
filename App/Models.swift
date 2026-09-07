@@ -356,7 +356,10 @@ struct AppSettings: Codable {
 
     func engineConfig() -> EngineConfig {
         var c = EngineConfig()
-        c.maxScanDuration = max(Self.maxScanFloor, maxScanSeconds)
+        // Repair rather than clamp: a stored 4 s pinned to the 5 s floor is the
+        // bug `migrated()` exists to fix, and clamping here reintroduced it for
+        // any caller that reached the engine without the load-time repair.
+        c.maxScanDuration = migrated().maxScanSeconds
         c.minScanDuration = max(0, min(minScanSeconds, c.maxScanDuration - 0.5))
         c.hardScanCeiling = c.maxScanDuration
         let inset = min(max(roiInset, 0), 0.4)
