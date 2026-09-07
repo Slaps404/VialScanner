@@ -29,6 +29,10 @@ struct ScanView: View {
     @State private var countdown: Double = 0
     @State private var countdownTotal: Double = 1
     @State private var autoAction: AutoAction? = nil
+    // Set when the operator hits Cancel mid-scan, so the hands-free watcher
+    // below doesn't immediately restart on the next tick. Cleared the next
+    // time a scan actually begins (manual tap or a normal auto-rescan).
+    @State private var handsFreePaused = false
     @State private var visualFocusPoint: CGPoint? = nil
     @State private var caption: String? = nil
     @State private var captionSeq = 0
@@ -67,7 +71,7 @@ struct ScanView: View {
         .onReceive(tick) { _ in
             advanceCountdown()
             if store.settings.handsFree, camera.phase == .idle, autoAction == nil,
-               camera.permission == .authorized {
+               camera.permission == .authorized, !handsFreePaused {
                 beginScan()
             }
         }
@@ -404,10 +408,7 @@ struct ScanView: View {
             .padding(.horizontal, 16).padding(.vertical, 12)
             .background(Capsule().fill(Color.black.opacity(0.5)))
 
-            // The bar tracks readiness to answer, not frames burned: elapsed
-            // time, OCR passes and how much of the label has actually been
-            // turned into view. A bar that fills at a fixed rate tells the user
-            // nothing about whether rotating further would help.
+            // Time spent collecting; this does not measure label completeness.
             ProgressView(value: camera.progress)
                 .progressViewStyle(.linear)
                 .tint(.white)
@@ -415,10 +416,9 @@ struct ScanView: View {
                 .padding(.horizontal, 24)
                 .animation(.easeOut(duration: 0.2), value: camera.progress)
 
-            // Faces of the label seen so far. This is the one piece of engine
-            // state worth showing outright: "keep rotating" is a nag, but a pip
-            // that lights up when a new side registers tells the user what the
-            // scanner is actually waiting for.
+            // Faces of the label read so far. No longer a stopping gate, but it
+            // is the only feedback that turning the vial is registering at all:
+            // the bar above just counts down the collection window.
             HStack(spacing: 5) {
                 ForEach(0..<3, id: \.self) { i in
                     Capsule()
@@ -430,6 +430,7 @@ struct ScanView: View {
 
             HStack(spacing: 12) {
                 Pill(title: "Cancel", kind: .quiet, wide: false) {
+                    handsFreePaused = true
                     camera.cancelScan()
                     cancelAuto()
                 }
@@ -480,6 +481,7 @@ struct ScanView: View {
     // MARK: - Scan lifecycle
 
     private func beginScan() {
+        handsFreePaused = false
         cancelAuto()
         // Record whenever the operator asked for clips, and always in hands-free:
         // an unattended pass that gets it wrong is exactly the case where the
@@ -511,7 +513,7 @@ struct ScanView: View {
             return
         }
         let meets = meetsAutoCommit(result.verdict)
-        if meets, result.vial != nil {
+        if meets, result.canAutoConfirm {
             autoAction = .confirm
         } else if store.settings.handsFreeParksUncertain {
             autoAction = .park
@@ -540,7 +542,9 @@ struct ScanView: View {
         autoAction = nil
         guard let result = camera.result else { return }
         switch action {
-        case .confirm: confirm(result)
+        case .confirm:
+            guard result.canAutoConfirm else { return }
+            confirm(result)
         case .park:    park(result)
         case .rescan, nil: rescan()
         }
@@ -579,6 +583,11 @@ struct ScanView: View {
             vendor: result.fields[.vendor],
             clone: result.fields[.clone],
             barcode: result.barcode?.raw,
+            concentration: result.fields[.concentration],
+            volume: result.fields[.volume],
+            isotype: result.fields[.isotype],
+            expiry: result.fields[.expiry],
+            storage: result.fields[.storage],
             score: result.score,
             margin: result.margin,
             reasons: result.reasons,
@@ -609,7 +618,7 @@ struct ScanView: View {
         var built = makeRecord(result, outcome: .confirmed, clip: clip)
         if let overrideAbNo {
             built.abNo = overrideAbNo
-            built.note = "Vial picked by hand — the engine could not tell these lots apart."
+            built.note = "Inventory record selected by the user; label evidence did not distinguish it."
         }
         let record = store.log(built)
 
@@ -622,7 +631,7 @@ struct ScanView: View {
             filed = store.stampSessionBox(abNo: abNo)
             if let audit = store.openAudit {
                 if audit.expected.contains(abNo) {
-                    store.recordFound(abNo, in: audit.id, method: "scan", scanID: record.id)
+                    store.recordFound(abNo, in: audit.id, method: overrideAbNo == nil ? "scan" : "manual", scanID: record.id)
                 } else {
                     store.recordExtra(AuditExtra(label: "AbNo \(abNo) · \(result.definition?.name ?? "")",
                                                  catalog: result.definition?.catalog,
