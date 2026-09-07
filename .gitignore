@@ -14,3 +14,5 @@ android/vialcore/bin/
 .vscode/
 scripts/__pycache__/
 artifacts/
+.claude/
+android/.kotlin/
