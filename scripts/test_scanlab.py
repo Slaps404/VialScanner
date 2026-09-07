@@ -84,7 +84,7 @@ class ScanLabCommandTests(unittest.TestCase):
             result = self.run_check(bundle)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_catalogue_rotation_must_be_declared_required(self) -> None:
+    def test_catalogue_completeness_uses_verified_fields_not_rotation(self) -> None:
         with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
             bundle = Path(directory) / "catalogue"
             shutil.copytree(FIXTURES / "good-catalogue", bundle)
@@ -93,8 +93,7 @@ class ScanLabCommandTests(unittest.TestCase):
             summary["capture"]["rotation"]["required"] = False
             summary_path.write_text(json.dumps(summary))
             result = self.run_check(bundle)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("rotation", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_absolute_artifact_path_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
@@ -229,6 +228,180 @@ class ScanLabCommandTests(unittest.TestCase):
         self.assertIn("adb pull failed", result.stderr)
         self.assertFalse(destination.exists())
         self.assertFalse(any(root.glob(".pulled.partial-*")))
+
+
+class ScanLabTranslateTests(unittest.TestCase):
+    """Native phone output is only reviewable after translation."""
+
+    def run_scanlab(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(COMMAND), *args],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def test_ios_sidecar_translates_into_a_passing_bundle(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            out = Path(directory) / "translated"
+            result = self.run_scanlab(
+                "translate", str(FIXTURES / "ios-known" / "scan-0001.json"), "--out", str(out)
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            summary = json.loads((out / "summary.json").read_text())
+            self.assertEqual(summary["schema"], "scanlab.bundle")
+            self.assertEqual(summary["platform"], "ios")
+            self.assertEqual(summary["groundTruth"]["mode"], "known_vial")
+            self.assertEqual(summary["groundTruth"]["fields"]["lot"], "B411234")
+            # Counters are derived from the translated trace so the integrity
+            # check compares like with like.
+            self.assertEqual(summary["capture"]["framesSeen"], 3)
+            self.assertEqual(summary["capture"]["usableFrames"], 2)
+            self.assertEqual(summary["capture"]["ocrFrames"], 2)
+            check = self.run_scanlab("check", str(out))
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+            self.assertIn("ScanLab PASS", check.stdout)
+
+    def test_translated_ios_miss_routes_to_extraction(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            out = Path(directory) / "translated"
+            self.run_scanlab("translate", str(FIXTURES / "ios-miss" / "scan-0002.json"), "--out", str(out))
+            check = self.run_scanlab("check", str(out))
+        self.assertEqual(check.returncode, 1)
+        self.assertIn("ERROR [extraction]", check.stdout)
+        self.assertIn("lot: expected 'B411234'", check.stdout)
+
+    def test_pixel_bundle_translates_using_the_operator_note(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            out = Path(directory) / "translated"
+            result = self.run_scanlab("translate", str(FIXTURES / "pixel-native"), "--out", str(out))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            summary = json.loads((out / "summary.json").read_text())
+            self.assertEqual(summary["platform"], "android")
+            self.assertEqual(summary["groundTruth"]["fields"]["catalog"], "910801")
+            check = self.run_scanlab("check", str(out))
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_native_pixel_check_still_reads_the_phone_format(self) -> None:
+        """The native reader and the translator share one frame-event builder."""
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            truth = Path(directory) / "truth.json"
+            truth.write_text(json.dumps({
+                "mode": "known_vial",
+                "fields": {"catalog": "910801", "lot": "B411234"},
+                "requiredFields": ["catalog", "lot"],
+                "verdict": "confident",
+            }))
+            result = self.run_scanlab(
+                "check", str(FIXTURES / "pixel-native"), "--pixel", "--truth", str(truth), "--json"
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["stats"]["frames"], 3)
+        self.assertEqual(payload["stats"]["usableFrames"], 2)
+        self.assertEqual(payload["stats"]["ocrFrames"], 2)
+        self.assertIn("ocr", payload["stats"]["stages"])
+
+    def test_translate_refuses_an_unknown_schema(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            source = Path(directory) / "other.json"
+            source.write_text(json.dumps({"schema": "something.else", "schemaVersion": 1}))
+            result = self.run_scanlab("translate", str(source), "--out", str(Path(directory) / "out"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a recognized", result.stderr)
+
+    def test_translate_refuses_to_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            out = Path(directory) / "translated"
+            out.mkdir()
+            result = self.run_scanlab(
+                "translate", str(FIXTURES / "ios-known" / "scan-0001.json"), "--out", str(out)
+            )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("already exists", result.stderr)
+
+
+class ScanLabReviewTests(unittest.TestCase):
+    """One command over a tray of scans, whatever format they arrived in."""
+
+    def run_review(self, root: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(COMMAND), "review", str(root), *extra],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def mixed_tray(self, directory: str) -> Path:
+        root = Path(directory) / "tray"
+        root.mkdir()
+        shutil.copytree(FIXTURES / "good-known", root / "canonical-known")
+        shutil.copytree(FIXTURES / "pixel-native", root / "pixel-known")
+        for name in ("ios-known", "ios-miss", "ios-unannotated"):
+            shutil.copytree(FIXTURES / name, root / name)
+        return root
+
+    def test_review_reports_every_scan_and_fails_on_a_miss(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            result = self.run_review(self.mixed_tray(directory))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("5 scans", result.stdout)
+        self.assertIn("ios-fixture-known", result.stdout)
+        self.assertIn("ios-fixture-miss", result.stdout)
+        self.assertIn("pixel-fixture-known", result.stdout)
+        # An un-annotated scan is not a scanner failure; it is a missing note.
+        self.assertIn("NOTE?", result.stdout)
+        self.assertIn("1 unannotated", result.stdout)
+        self.assertIn("[extraction] field-mismatch", result.stdout)
+
+    def test_review_names_the_failing_layer_not_a_warning(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            root = Path(directory) / "tray"
+            root.mkdir()
+            shutil.copytree(FIXTURES / "bad-mismatch", root / "canonical-mismatch")
+            result = self.run_review(root, "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["scans"][0]["layer"], "extraction")
+
+    def test_review_json_ranks_failure_modes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            result = self.run_review(self.mixed_tray(directory), "--json")
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["counts"]["correct"], 3)
+        self.assertEqual(payload["counts"]["unannotated"], 1)
+        self.assertEqual(payload["counts"]["wrong_result"], 1)
+        top = payload["failureModes"][0]
+        self.assertEqual(top["layer"], "extraction")
+        self.assertEqual(top["code"], "field-mismatch")
+        self.assertEqual(top["count"], 1)
+        notes = {scan["bundleId"]: scan["note"] for scan in payload["scans"]}
+        self.assertIn("lot never made it into the result", notes["ios-fixture-miss"])
+
+    def test_review_only_fail_hides_passing_scans(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            result = self.run_review(self.mixed_tray(directory), "--only-fail")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ios-fixture-miss", result.stdout)
+        self.assertNotIn("ios-fixture-known", result.stdout)
+
+    def test_review_of_only_good_scans_is_green(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            root = Path(directory) / "tray"
+            root.mkdir()
+            shutil.copytree(FIXTURES / "ios-known", root / "ios-known")
+            result = self.run_review(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1 scans", result.stdout)
+
+    def test_review_needs_at_least_one_bundle(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            result = self.run_review(Path(directory))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no debug bundles", result.stderr)
 
 
 if __name__ == "__main__":

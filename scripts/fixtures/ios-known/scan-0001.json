@@ -1,0 +1,43 @@
+{
+  "schema": "vial-scanner.scan-debug",
+  "schemaVersion": 1,
+  "clip": "clip-0001.mov",
+  "recordedAt": "2026-09-03T12:10:01Z",
+  "note": "cat=910801 lot=B411234 expect=confident",
+  "expect": {"catalog": "910801", "lot": "B411234", "verdict": "confident"},
+  "summary": {
+    "scanID": "ios-fixture-known",
+    "startedAt": "2026-09-03T12:10:00Z",
+    "endedAt": "2026-09-03T12:10:01Z",
+    "build": {"bundleID": "org.lji.Vyals", "version": "1.0", "build": "42"},
+    "catalog": {"sha256": "abc123", "definitions": 12, "inventoryItems": 30},
+    "device": {"model": "iPhone", "name": "fixture", "systemName": "iOS",
+               "systemVersion": "26.5", "processArchitecture": "arm64", "lowPowerMode": false},
+    "thermal": {"start": "nominal", "end": "nominal", "changedDuringScan": false},
+    "capture": {
+      "mode": "performance", "requestedClip": true, "frameEvents": 3, "framesIngested": 3,
+      "ocrPasses": 2, "barcodePasses": 1, "droppedFrames": 0, "framesSeen": 3,
+      "ocrFramesUsed": 2, "mediaDurationSeconds": 1.0, "elapsedSeconds": 0.9, "roiInset": 0.15
+    },
+    "result": {
+      "verdict": "confident", "evidenceLevel": "full", "readNothing": false,
+      "definitionName": "Fixture antibody", "abNo": "42", "catalog": "910801",
+      "lot": "B411234", "score": 0.91, "margin": 0.4, "reasons": ["label match"],
+      "framesUsed": 2, "lotNotOnRecord": false,
+      "fields": {"catalog": "910801", "lot": "B411234"}, "missingFields": ["clone"]
+    },
+    "evidence": {"frameCount": 3, "allText": ["CAT. NO. 910801", "LOT B411234"], "distinctViews": 2}
+  },
+  "trace": [
+    {"sequence": 0, "captureTimestamp": 0.0, "elapsedMilliseconds": 31.0, "ingestMilliseconds": 4.0,
+     "width": 1920, "height": 1080, "pixelFormat": "420f", "barcodeAttempted": true, "ocrAttempted": true,
+     "observations": [{"text": "CAT. NO. 910801", "confidence": 0.94}], "barcodes": [], "status": "processed"},
+    {"sequence": 1, "captureTimestamp": 0.5, "elapsedMilliseconds": 29.0, "ingestMilliseconds": 4.0,
+     "width": 1920, "height": 1080, "pixelFormat": "420f", "barcodeAttempted": false, "ocrAttempted": true,
+     "observations": [{"text": "LOT B411234", "confidence": 0.9}], "barcodes": [], "status": "processed"},
+    {"sequence": 2, "captureTimestamp": 0.9, "elapsedMilliseconds": 3.0,
+     "width": 1920, "height": 1080, "barcodeAttempted": false, "ocrAttempted": false,
+     "observations": [], "barcodes": [], "status": "skipped", "skipReason": "blurry"}
+  ],
+  "accuracy": {"enabled": false, "policy": "none", "imageFiles": []}
+}

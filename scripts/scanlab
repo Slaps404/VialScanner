@@ -17,8 +17,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import statistics
 import subprocess
 import sys
+import tempfile
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
@@ -28,7 +30,7 @@ from typing import Any, Iterator, Mapping, Sequence
 SCHEMA = "scanlab.bundle"
 SCHEMA_VERSION = 1
 TOOL_VERSION = "1"
-MIN_ROTATION_COVERAGE = 0.85
+PIXEL_FORMAT = "org.lji.vialscanner.debug"
 DEFAULT_PIXEL_REMOTE = "/sdcard/Android/media/org.lji.vialscanner/debug-bundles"
 
 SUCCESS_VERDICTS = {"certain", "confident"}
@@ -722,8 +724,11 @@ def expected_fields(truth: Mapping[str, Any], report: BundleReport) -> tuple[str
         for name in identity:
             if name in values and name not in required:
                 required.append(name)
-    if mode == "new_vial" and not required:
+    if mode == "new_vial" and (not required or required_raw is None):
         issue(report, "error", "ground-truth", "fields-missing", "new_vial ground truth needs fields and requiredFields")
+    for name, value in values.items():
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (str, int, float)) or (isinstance(value, (int, float)) and not finite_number(value))):
+            issue(report, "error", "ground-truth", "field-type", f"groundTruth field {name!r} must be a finite scalar or null")
     for name in required:
         if name not in values:
             issue(report, "error", "ground-truth", "field-missing", f"groundTruth.requiredFields names {name!r}, but groundTruth.fields does not define it")
@@ -780,12 +785,14 @@ def compare_tape_to_actual(report: BundleReport) -> None:
             issue(report, "error", "integrity", "tape-summary", f"tape {name} {display_value(tape_value)!r} disagrees with summary.actual {display_value(actual_value)!r}")
 
 
-def validate_summary(report: BundleReport) -> tuple[dict[str, Any] | None, list[Path]]:
+def validate_summary(report: BundleReport, truth_path: Path | None = None) -> tuple[dict[str, Any] | None, list[Path]]:
     summary_path = report.path / "summary.json"
     summary = read_json(summary_path, report, "summary.json")
     if summary is None:
         report.layers["schema"] = "FAIL"
         return None, []
+    if truth_path is not None:
+        summary["groundTruth"] = read_json(truth_path, report, "independent ground truth")
     report.summary = summary
     if summary.get("schema") != SCHEMA:
         issue(report, "error", "schema", "schema-name", f"summary.schema must be {SCHEMA!r}")
@@ -828,25 +835,21 @@ def validate_summary(report: BundleReport) -> tuple[dict[str, Any] | None, list[
             else:
                 as_nonnegative_int(value, f"summary.capture.{label}", report)
         rotation = capture.get("rotation")
-        if not isinstance(rotation, Mapping):
-            issue(report, "error", "schema", "rotation", "summary.capture.rotation must include required and coverage")
-        else:
-            if not isinstance(rotation.get("required"), bool):
-                issue(report, "error", "schema", "rotation-required", "summary.capture.rotation.required must be boolean")
-            coverage = rotation.get("coverage", rotation.get("coverageFraction"))
-            if not finite_number(coverage) or not 0 <= float(coverage) <= 1:
-                issue(report, "error", "schema", "rotation-coverage", "summary.capture.rotation.coverage must be a number from 0 to 1")
-            elif report.expected.get("mode") == "new_vial":
-                if rotation.get("required") is not True:
-                    issue(report, "error", "capture", "rotation-required", "catalogue scans must declare summary.capture.rotation.required=true")
-                if float(coverage) < MIN_ROTATION_COVERAGE:
-                    issue(report, "error", "capture", "incomplete-rotation", f"catalogue scan covered {float(coverage):.0%} of the rotation, below {MIN_ROTATION_COVERAGE:.0%}")
+        if "rotation" in capture:
+            if not isinstance(rotation, Mapping):
+                issue(report, "error", "schema", "rotation", "summary.capture.rotation must be an object")
+            else:
+                if not isinstance(rotation.get("required"), bool):
+                    issue(report, "error", "schema", "rotation-required", "summary.capture.rotation.required must be boolean")
+                coverage = rotation.get("coverage", rotation.get("coverageFraction"))
+                if not finite_number(coverage) or not 0 <= float(coverage) <= 1:
+                    issue(report, "error", "schema", "rotation-coverage", "summary.capture.rotation.coverage must be a number from 0 to 1")
         thermal = capture.get("thermal")
         if thermal is None:
             issue(report, "warning", "capture", "thermal-missing", "capture.thermal is missing; timing cannot be trusted")
         for key in ("durationMs", "elapsedMs"):
-            if key in capture and not finite_number(capture[key]):
-                issue(report, "error", "schema", "capture-duration", f"summary.capture.{key} must be a finite number")
+            if key in capture and (not finite_number(capture[key]) or capture[key] < 0):
+                issue(report, "error", "schema", "capture-duration", f"summary.capture.{key} must be a non-negative finite number")
     if artifacts is None:
         return summary, []
     trace_value = artifacts.get("trace")
@@ -1020,13 +1023,161 @@ def assign_layers(report: BundleReport) -> None:
             report.layers[layer] = "OK"
 
 
-def validate_bundle(path: Path) -> BundleReport:
+def validate_pixel(report: BundleReport, truth_path: Path | None) -> None:
+    """Read the phone's actual format without rewriting evidence or inferring truth."""
+    native = read_json(report.path / "bundle.json", report, "bundle.json")
+    if native is None:
+        return
+    if native.get("format") != PIXEL_FORMAT or type(native.get("schemaVersion")) is not int or native["schemaVersion"] != 1:
+        issue(report, "error", "schema", "native-version", "unsupported Pixel format/schemaVersion")
+        return
+    scan = as_mapping(native.get("scan"), "scan", report) or {}
+    config = as_mapping(native.get("config"), "config", report) or {}
+    actual = as_mapping(native.get("result"), "result", report) or {}
+    if scan.get("status") != "finished":
+        issue(report, "error", "capture", "unfinished", "scan did not finish; cancelled captures cannot pass")
+    if truth_path is None:
+        issue(report, "error", "ground-truth", "truth-required", "Pixel check needs --truth with independently verified values")
+        truth = {}
+    else:
+        truth = read_json(truth_path, report, "independent ground truth") or {}
+    mode, required = expected_fields(truth, report)
+    report.expected = {"mode": mode, "requiredFields": required, "record": truth}
+    report.actual = dict(actual)
+    if canonical_verdict(actual.get("verdict")) is None:
+        issue(report, "error", "schema", "actual-verdict", "Pixel result.verdict is invalid")
+    if "fields" in actual and not isinstance(actual["fields"], dict):
+        issue(report, "error", "schema", "actual-fields", "Pixel result.fields must be an object")
+        report.actual["fields"] = {}
+    start, end = scan.get("startedAtEpochMs"), scan.get("endedAtEpochMs")
+    duration = end - start if finite_number(start) and finite_number(end) else None
+    if duration is None or duration < 0:
+        issue(report, "error", "schema", "duration", "Pixel scan needs valid start/end timestamps")
+    capture_mode = canonical_token(config.get("mode"))
+    if capture_mode not in {"accuracy", "performance"}:
+        issue(report, "error", "schema", "capture-mode", "Pixel capture mode must be accuracy or performance")
+    thermal = native.get("thermal")
+    report.summary = {
+        "bundleId": scan.get("id"), "createdAt": scan.get("startedAt"), "platform": "android",
+        "goal": "catalogue" if mode == "new_vial" else "identify", "groundTruth": truth,
+        "actual": report.actual, "capture": {"mode": capture_mode, "durationMs": duration, "thermal": thermal},
+        "build": native.get("build"), "catalog": native.get("catalog"), "config": config,
+    }
+    frames = native.get("frames")
+    if not isinstance(frames, list) or not frames:
+        issue(report, "error", "schema", "no-frames", "Pixel bundle needs a non-empty frames array")
+        return
+    previous_time = float("-inf")
+    image_files: set[Path] = set()
+    for index, frame in enumerate(frames):
+        if not isinstance(frame, dict):
+            issue(report, "error", "schema", "frame-type", f"frame {index} must be an object")
+            continue
+        for flag in ("ocrAttempted", "barcodeAttempted"):
+            if type(frame.get(flag)) is not bool:
+                issue(report, "error", "schema", "frame-flag", f"frame {index}: {flag} must be boolean")
+        observations, barcodes = frame.get("observations", []), frame.get("barcodes", [])
+        if not isinstance(observations, list) or not all(isinstance(o, dict) and isinstance(o.get("text"), str) for o in observations):
+            issue(report, "error", "schema", "observations", f"frame {index}: invalid observations")
+            observations = []
+        if not isinstance(barcodes, list) or not all(isinstance(b, dict) and isinstance(b.get("raw"), str) for b in barcodes):
+            issue(report, "error", "schema", "barcodes", f"frame {index}: invalid barcodes")
+            barcodes = []
+        timestamp = frame.get("timestampSeconds")
+        if finite_number(timestamp):
+            if timestamp < previous_time:
+                issue(report, "error", "integrity", "timestamp-order", "Pixel frame timestamps move backwards")
+            previous_time = timestamp
+        event = pixel_event(frame, observations, barcodes)
+        for source in PIXEL_STAGE_MS:
+            value = frame.get(source)
+            if value is not None and (not finite_number(value) or value < 0):
+                issue(report, "error", "schema", "stage-duration", f"frame {index}: invalid {source}")
+        parse_frame(event, report.stats, report, index + 1)
+        if capture_mode == "accuracy" and frame.get("ocrAttempted") is True:
+            image = safe_artifact_path(report.path, frame.get("ocrInputFile"), report, "ocrInputFile")
+            if image is not None:
+                if not image.is_file() or image.stat().st_size == 0 or image in image_files:
+                    issue(report, "error", "capture", "ocr-image", "each OCR attempt needs its own non-empty image file")
+                image_files.add(image)
+    indices = report.stats.frame_indices
+    if len(set(indices)) != len(indices) or indices != sorted(indices):
+        issue(report, "error", "integrity", "frame-order", "Pixel frame indices must be unique and ascending")
+    if report.stats.usable_count == 0:
+        issue(report, "error", "capture", "no-usable-frames", "no readable text or barcode was captured")
+    if capture_mode == "accuracy":
+        issue(report, "warning", "performance", "accuracy-timing", "accuracy image encoding affects timing; compare speed using performance mode")
+    if not isinstance(thermal, dict) or thermal.get("startStatus") != 0 or thermal.get("endStatus") != 0:
+        issue(report, "warning", "performance", "thermal", "non-nominal or missing thermal state; timing is not comparable")
+    if not report.stats.stage_ms:
+        issue(report, "warning", "performance", "timing-missing", "no stage timings recorded")
+    compare_ground_truth(report)
+
+
+def field_mismatches(report: BundleReport) -> list[str]:
+    return [i.message for i in report.errors if i.code in {"field-mismatch", "scanner-miss", "verdict-mismatch", "false-positive", "known-not-resolved"}]
+
+
+def case_outcome(report: BundleReport) -> str:
+    if any(i.layer in {"schema", "ground-truth", "integrity"} for i in report.errors):
+        return "invalid"
+    if report.errors:
+        return "wrong_result" if canonical_verdict(report.actual.get("verdict")) in SUCCESS_VERDICTS else "unresolved"
+    return "correct"
+
+
+def check_corpus(path: Path) -> dict[str, Any]:
+    """Explicit cases and physical-vial splits keep repeat clips out of holdout."""
+    try:
+        manifest = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ScanLabError(f"cannot read corpus: {exc}") from exc
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("cases"), list) or not manifest["cases"]:
+        raise ScanLabError("corpus needs a non-empty cases array")
+    cases, splits, seen_bundles = [], {}, set()
+    for case in manifest["cases"]:
+        if not isinstance(case, dict) or any(not isinstance(case.get(k), str) or not case[k].strip() for k in ("bundle", "truth", "physicalVial", "split")):
+            raise ScanLabError("each corpus case needs bundle, truth, physicalVial and split")
+        if case["split"] not in {"development", "holdout"}:
+            raise ScanLabError("split must be development or holdout")
+        vial = case["physicalVial"]
+        if vial in splits and splits[vial] != case["split"]:
+            raise ScanLabError(f"physical vial {vial!r} occurs in both development and holdout")
+        splits[vial] = case["split"]
+        bundle = (path.parent / case["bundle"]).resolve()
+        if bundle in seen_bundles:
+            raise ScanLabError("duplicate bundle in corpus")
+        seen_bundles.add(bundle)
+        report = validate_bundle(bundle, (bundle / "bundle.json").is_file(), path.parent / case["truth"])
+        result = report_json(report)
+        result.update({"physicalVial": vial, "split": case["split"]})
+        cases.append(result)
+    counts = {name: sum(c["outcome"] == name for c in cases) for name in ("correct", "wrong_result", "unresolved", "invalid")}
+    timings = []
+    for c in cases:
+        capture = (c.get("summary") or {}).get("capture", {})
+        thermal = capture.get("thermal") or {}
+        nominal = isinstance(thermal, dict) and thermal.get("startStatus", thermal.get("start")) == 0 and thermal.get("endStatus", thermal.get("end")) == 0
+        duration = capture.get("durationMs")
+        if c["outcome"] == "correct" and canonical_token(capture.get("mode")) == "performance" and nominal and finite_number(duration):
+            timings.append(duration)
+    return {"ok": all(c["ok"] for c in cases), "counts": counts, "cases": cases,
+            "correctPerformanceTiming": {"n": len(timings), "medianMs": statistics.median(timings) if timings else None,
+                "p90Ms": sorted(timings)[math.ceil(len(timings) * .9) - 1] if timings else None},
+            "note": "Results are proposals, not evidence of inventory writes. Compare timing only for the same device, build settings and corpus."}
+
+
+def validate_bundle(path: Path, native_pixel: bool = False, truth_path: Path | None = None) -> BundleReport:
     report = BundleReport(path=path)
     if not path.exists() or not path.is_dir():
         issue(report, "error", "schema", "bundle-path", f"bundle directory does not exist: {path}")
         assign_layers(report)
         return report
-    _, artifact_paths = validate_summary(report)
+    if native_pixel:
+        validate_pixel(report, truth_path)
+        assign_layers(report)
+        return report
+    _, artifact_paths = validate_summary(report, truth_path)
     if report.summary is not None:
         if report.stats.frame_count > 0 and report.stats.usable_count == 0:
             issue(report, "error", "capture", "no-usable-frames", "trace contains no usable frames")
@@ -1079,13 +1230,14 @@ def render_report(report: BundleReport) -> str:
     duration = capture.get("durationMs", capture.get("elapsedMs"))
     thermal = capture.get("thermal")
     if isinstance(thermal, Mapping):
-        thermal = f"start={display_value(thermal.get('start'))}, end={display_value(thermal.get('end'))}"
+        thermal = f"start={display_value(thermal.get('start', thermal.get('startStatus')))}, end={display_value(thermal.get('end', thermal.get('endStatus')))}"
     lines.extend([
         "",
         "Evidence:",
         f"  frames {report.stats.frame_count} ({report.stats.usable_count} usable), OCR {report.stats.ocr_count} passes, text lines {report.stats.ocr_text_count}, barcodes {report.stats.barcode_count}",
         f"  rotation {float(coverage):.0%}" if isinstance(coverage, (int, float)) else "  rotation n/a",
-        f"  duration {format_duration(duration)}, thermal {display_value(thermal)}",
+        f"  duration {format_duration(duration)}, mode {capture.get('mode', 'unknown')}, thermal {display_value(thermal)}",
+        f"  outcome {case_outcome(report)}",
     ])
     if report.stats.skip_reasons:
         reasons = ", ".join(f"{name}={count}" for name, count in sorted(report.stats.skip_reasons.items()))
@@ -1113,8 +1265,12 @@ def report_json(report: BundleReport) -> dict[str, Any]:
             "ocrFrames": report.stats.ocr_count,
             "ocrTextLines": report.stats.ocr_text_count,
             "barcodes": report.stats.barcode_count,
+            "stages": {name: {"n": len(values), "medianMs": statistics.median(values),
+                "p90Ms": sorted(values)[math.ceil(len(values) * .9) - 1]} for name, values in report.stats.stage_ms.items() if values},
         },
         "summary": summary,
+        "outcome": case_outcome(report),
+        "mismatches": field_mismatches(report),
         "corrections": report.corrections,
         "issues": [item.__dict__ for item in report.issues],
     }
@@ -1230,12 +1386,357 @@ def pull_pixel(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Native phone formats -----------------------------------------------------
+#
+# `check` reads the canonical bundle. Phones write their own shapes, so the
+# translation lives here and nowhere else: one reader per platform, then every
+# downstream layer check runs on the same canonical bundle.
+
+IOS_SCHEMA = "vial-scanner.scan-debug"
+
+PIXEL_STAGE_MS = {"ocrMs": "ocr", "barcodeMs": "barcodeTiming", "sharpnessMs": "sharpness",
+                  "ingestMs": "ingest", "conversionMs": "conversion", "imageEncodingMs": "imageEncoding"}
+
+IOS_STAGE_MS = {"elapsedMilliseconds": "frame", "ingestMilliseconds": "ingest",
+                "queueWaitMilliseconds": "queueWait"}
+
+
+def stage_durations(event: dict[str, Any], frame: Mapping[str, Any], sources: Mapping[str, str]) -> None:
+    for source, stage in sources.items():
+        value = frame.get(source)
+        if finite_number(value) and value >= 0:
+            event.setdefault(stage, {})["durationMs"] = value
+
+
+def pixel_event(frame: Mapping[str, Any], observations: Sequence[Mapping[str, Any]],
+                barcodes: Sequence[Any]) -> dict[str, Any]:
+    event = {"event": "frame", "index": frame.get("index"), "timestamp": frame.get("timestampSeconds"),
+             "usable": bool(observations or barcodes),
+             "ocr": {"ran": frame.get("ocrAttempted"), "lines": [o["text"] for o in observations]},
+             "barcodes": list(barcodes), "skipReason": frame.get("skipReason")}
+    stage_durations(event, frame, PIXEL_STAGE_MS)
+    return event
+
+
+def ios_event(frame: Mapping[str, Any]) -> dict[str, Any]:
+    observations = [o for o in frame.get("observations") or [] if isinstance(o, Mapping)]
+    barcodes = [b for b in frame.get("barcodes") or [] if isinstance(b, Mapping)]
+    event = {"event": "frame", "index": frame.get("sequence"), "timestamp": frame.get("captureTimestamp"),
+             "usable": bool(observations or barcodes),
+             "ocr": {"ran": bool(frame.get("ocrAttempted")),
+                     "lines": [o["text"] for o in observations if isinstance(o.get("text"), str)]},
+             "barcodes": barcodes, "skipReason": frame.get("skipReason")}
+    stage_durations(event, frame, IOS_STAGE_MS)
+    return event
+
+
+def note_ground_truth(note: Any, expectation: Any) -> dict[str, Any] | None:
+    """Turn the operator's in-app note into checkable ground truth.
+
+    The note is the only truth the phone has. An empty note yields None, which
+    keeps the bundle honestly un-judgeable instead of silently passing.
+    """
+    fields: dict[str, Any] = {}
+    if isinstance(expectation, Mapping):
+        for name in ("catalog", "lot", "clone"):
+            value = expectation.get(name)
+            if isinstance(value, str) and value.strip():
+                fields[name] = value.strip()
+        verdict = expectation.get("verdict")
+    else:
+        verdict = None
+    canonical = canonical_verdict(verdict)
+    if canonical is None and not fields:
+        return None
+    truth: dict[str, Any] = {
+        "mode": "new_vial" if canonical == "notFound" else "known_vial",
+        "fields": fields,
+        "requiredFields": sorted(fields),
+    }
+    if verdict is not None:
+        truth["verdict"] = verdict
+    if isinstance(note, str) and note.strip():
+        truth["note"] = note.strip()
+    return truth
+
+
+def trace_counters(events: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    """Derive capture counters from the trace being written.
+
+    The phone's engine counters count a different population (ingested frames,
+    not captured ones), so copying them would trip the integrity check on every
+    bundle. The phone's own numbers are preserved under `config`.
+    """
+    return {
+        "framesSeen": len(events),
+        "usableFrames": sum(1 for e in events if e.get("usable")),
+        "ocrFrames": sum(1 for e in events if isinstance(e.get("ocr"), Mapping) and e["ocr"].get("ran")),
+    }
+
+
+def is_ios_sidecar(path: Path) -> bool:
+    if not path.is_file() or path.suffix != ".json":
+        return False
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(document, dict) and document.get("schema") == IOS_SCHEMA
+
+
+def translate_ios(document: Mapping[str, Any], base: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[Path]]:
+    if document.get("schemaVersion") != 1:
+        raise ScanLabError(f"unsupported {IOS_SCHEMA} schemaVersion {document.get('schemaVersion')!r}")
+    summary = document.get("summary")
+    if not isinstance(summary, Mapping):
+        raise ScanLabError("iOS sidecar needs a summary object")
+    frames = document.get("trace")
+    if not isinstance(frames, list) or not frames:
+        raise ScanLabError("iOS sidecar needs a non-empty trace array")
+    events = [ios_event(frame) for frame in frames if isinstance(frame, Mapping)]
+    capture = summary.get("capture") if isinstance(summary.get("capture"), Mapping) else {}
+    accuracy = document.get("accuracy") if isinstance(document.get("accuracy"), Mapping) else {}
+    truth = note_ground_truth(document.get("note"), document.get("expect"))
+    elapsed = capture.get("elapsedSeconds")
+    out = {
+        "schema": SCHEMA,
+        "schemaVersion": SCHEMA_VERSION,
+        "bundleId": summary.get("scanID") or document.get("clip") or base.name,
+        "createdAt": summary.get("startedAt") or document.get("recordedAt"),
+        "platform": "ios",
+        "goal": "catalogue" if truth and truth["mode"] == "new_vial" else "identify",
+        "actual": dict(summary.get("result") or {}),
+        "capture": {**trace_counters(events),
+                    "mode": canonical_token(capture.get("mode")),
+                    "durationMs": elapsed * 1000 if finite_number(elapsed) else None,
+                    "thermal": summary.get("thermal")},
+        "build": summary.get("build"),
+        "catalog": summary.get("catalog"),
+        "device": summary.get("device"),
+        "config": capture,
+        "clip": document.get("clip"),
+        "note": document.get("note"),
+        "artifacts": {"trace": "trace.jsonl"},
+    }
+    if out["capture"]["durationMs"] is None:
+        del out["capture"]["durationMs"]
+    if truth is not None:
+        out["groundTruth"] = truth
+    images = [base / name for name in accuracy.get("imageFiles") or [] if isinstance(name, str)]
+    return out, events, [p for p in images if p.is_file()]
+
+
+def translate_pixel(document: Mapping[str, Any], base: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[Path]]:
+    if document.get("format") != PIXEL_FORMAT or document.get("schemaVersion") != 1:
+        raise ScanLabError(f"unsupported {PIXEL_FORMAT} format/schemaVersion")
+    frames = document.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise ScanLabError("Pixel bundle needs a non-empty frames array")
+    events = []
+    images = []
+    for frame in frames:
+        if not isinstance(frame, Mapping):
+            continue
+        observations = [o for o in frame.get("observations") or [] if isinstance(o, Mapping) and isinstance(o.get("text"), str)]
+        barcodes = [b for b in frame.get("barcodes") or [] if isinstance(b, Mapping)]
+        events.append(pixel_event(frame, observations, barcodes))
+        name = frame.get("ocrInputFile")
+        if isinstance(name, str) and (base / name).is_file():
+            images.append(base / name)
+    scan = document.get("scan") if isinstance(document.get("scan"), Mapping) else {}
+    config = document.get("config") if isinstance(document.get("config"), Mapping) else {}
+    native_truth = document.get("groundTruth") if isinstance(document.get("groundTruth"), Mapping) else {}
+    truth = note_ground_truth(native_truth.get("note"), native_truth.get("expectation"))
+    start, end = scan.get("startedAtEpochMs"), scan.get("endedAtEpochMs")
+    out = {
+        "schema": SCHEMA,
+        "schemaVersion": SCHEMA_VERSION,
+        "bundleId": scan.get("id") or base.name,
+        "createdAt": scan.get("startedAt"),
+        "platform": "android",
+        "goal": "catalogue" if truth and truth["mode"] == "new_vial" else "identify",
+        "actual": dict(document.get("result") or {}),
+        "capture": {**trace_counters(events),
+                    "mode": canonical_token(config.get("mode")),
+                    "thermal": document.get("thermal")},
+        "build": document.get("build"),
+        "catalog": document.get("catalog"),
+        "device": document.get("device"),
+        "config": config,
+        "note": native_truth.get("note"),
+        "artifacts": {"trace": "trace.jsonl"},
+    }
+    if finite_number(start) and finite_number(end):
+        out["capture"]["durationMs"] = end - start
+    if scan.get("status") != "finished":
+        out["capture"]["status"] = scan.get("status")
+    if truth is not None:
+        out["groundTruth"] = truth
+    return out, events, images
+
+
+def read_native(path: Path) -> tuple[str, dict[str, Any], Path]:
+    """Classify one path as an iOS sidecar file or a native Pixel bundle directory."""
+    if path.is_dir():
+        native = path / "bundle.json"
+        if not native.is_file():
+            raise ScanLabError(f"{path} is not a recognized native bundle directory (no bundle.json)")
+        source = native
+    elif path.is_file():
+        source = path
+    else:
+        raise ScanLabError(f"path does not exist: {path}")
+    try:
+        document = json.loads(source.read_text())
+    except (OSError, ValueError) as exc:
+        raise ScanLabError(f"cannot read {source}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ScanLabError(f"{source} must contain a JSON object")
+    if document.get("schema") == IOS_SCHEMA:
+        return "ios", document, source.parent
+    if document.get("format") == PIXEL_FORMAT:
+        return "pixel", document, source.parent
+    raise ScanLabError(f"{source} is not a recognized native debug format")
+
+
+def translate_native(path: Path, out: Path) -> Path:
+    """Write one native phone bundle as a canonical bundle directory."""
+    kind, document, base = read_native(path)
+    summary, events, images = (translate_ios if kind == "ios" else translate_pixel)(document, base)
+    if out.exists():
+        raise ScanLabError(f"destination already exists: {out}")
+    out.mkdir(parents=True)
+    if images:
+        (out / "images").mkdir()
+        for image in images:
+            shutil.copy2(image, out / "images" / image.name)
+        summary["artifacts"]["images"] = "images"
+    (out / "trace.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+    (out / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    return out
+
+
+# --- Batch review -------------------------------------------------------------
+
+REVIEW_OUTCOMES = ("correct", "wrong_result", "unresolved", "invalid", "unannotated")
+
+
+def find_review_targets(root: Path) -> list[tuple[str, Path]]:
+    """Every reviewable scan under root, in whichever format it arrived."""
+    if root.is_file():
+        return [("native", root)] if is_ios_sidecar(root) else []
+    targets: list[tuple[str, Path]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        directory = Path(dirpath)
+        if "summary.json" in filenames:
+            targets.append(("canonical", directory))
+            dirnames[:] = []
+            continue
+        if "bundle.json" in filenames:
+            targets.append(("native", directory))
+            dirnames[:] = []
+            continue
+        for name in sorted(filenames):
+            if is_ios_sidecar(directory / name):
+                targets.append(("native", directory / name))
+        dirnames.sort()
+    return sorted(targets, key=lambda target: str(target[1]))
+
+
+def review_row(kind: str, path: Path, work: Path, index: int) -> dict[str, Any]:
+    if kind == "canonical":
+        report = validate_bundle(path)
+    else:
+        try:
+            bundle = translate_native(path, work / f"{index:04d}")
+        except ScanLabError as exc:
+            return {"path": str(path), "bundleId": path.name, "platform": "unknown", "goal": "unknown",
+                    "outcome": "invalid", "layer": "schema", "note": "", "mismatches": [],
+                    "issues": [{"severity": "error", "layer": "schema", "code": "translate", "message": str(exc)}]}
+        report = validate_bundle(bundle)
+    payload = report_json(report)
+    summary = payload["summary"] if isinstance(payload.get("summary"), Mapping) else {}
+    annotated = isinstance(summary.get("groundTruth"), Mapping)
+    outcome = payload["outcome"] if annotated else "unannotated"
+    # The first FAIL is the layer to fix; a WARN alone is not what broke the scan.
+    layer = next((name for name, state in report.layers.items() if state == "FAIL"), None)
+    note = summary.get("note")
+    if not isinstance(note, str):
+        truth = summary.get("groundTruth")
+        note = truth.get("note", "") if isinstance(truth, Mapping) else ""
+    return {"path": str(path), "bundleId": summary.get("bundleId") or path.name,
+            "platform": summary.get("platform", "unknown"), "goal": summary.get("goal", "unknown"),
+            "outcome": outcome, "layer": None if outcome == "unannotated" else layer,
+            "note": note, "mismatches": payload["mismatches"],
+            "issues": [] if outcome == "unannotated" else payload["issues"]}
+
+
+def review_corpus(root: Path) -> dict[str, Any]:
+    targets = find_review_targets(root)
+    if not targets:
+        raise ScanLabError(f"no debug bundles found under {root}")
+    scans = []
+    with tempfile.TemporaryDirectory(prefix="scanlab-review-") as work:
+        for index, (kind, path) in enumerate(targets):
+            scans.append(review_row(kind, path, Path(work), index))
+    counts = {name: sum(scan["outcome"] == name for scan in scans) for name in REVIEW_OUTCOMES}
+    modes: dict[tuple[str, str], int] = {}
+    for scan in scans:
+        for item in scan["issues"]:
+            if item["severity"] == "error":
+                key = (item["layer"], item["code"])
+                modes[key] = modes.get(key, 0) + 1
+    failure_modes = [{"layer": layer, "code": code, "count": count}
+                     for (layer, code), count in sorted(modes.items(), key=lambda kv: (-kv[1], kv[0]))]
+    ok = not any(scan["outcome"] not in {"correct", "unannotated"} for scan in scans)
+    return {"ok": ok, "root": str(root), "counts": counts, "scans": scans, "failureModes": failure_modes}
+
+
+def render_review(result: Mapping[str, Any], only_fail: bool = False) -> str:
+    counts = result["counts"]
+    lines = [f"ScanLab review {'PASS' if result['ok'] else 'FAIL'}: {len(result['scans'])} scans "
+             f"({counts['correct']} correct, {counts['wrong_result']} wrong_result, "
+             f"{counts['unresolved']} unresolved, {counts['invalid']} invalid, "
+             f"{counts['unannotated']} unannotated)", ""]
+    labels = {"correct": "PASS", "unannotated": "NOTE?"}
+    shown = 0
+    for scan in result["scans"]:
+        if only_fail and scan["outcome"] in {"correct", "unannotated"}:
+            continue
+        shown += 1
+        note = scan["note"].strip().replace("\n", " ")
+        lines.append(f"  {labels.get(scan['outcome'], 'FAIL'):5} {scan['bundleId'][:28]:28} "
+                     f"{scan['platform']:8}{scan['goal']:10}{scan['layer'] or '-':12}{note[:60]}")
+    if shown == 0:
+        lines.append("  (nothing failing)")
+    if result["failureModes"]:
+        lines.extend(["", "Top failure modes:"])
+        for mode in result["failureModes"]:
+            lines.append(f"  {mode['count']}x [{mode['layer']}] {mode['code']}")
+    if counts["unannotated"]:
+        lines.extend(["", "NOTE? scans carry no expectation. Add cat=/lot=/expect= in the app's "
+                      "clip note field so they can be judged."])
+    lines.extend(["", "Next: fix the top layer, then rerun this command on the same directory."])
+    return "\n".join(lines)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="scanlab", description="Validate VialScanner debug bundles and pull Pixel artifacts safely")
     sub = parser.add_subparsers(dest="command", required=True)
     check = sub.add_parser("check", help="validate a versioned bundle and print a layer report")
     check.add_argument("bundle", type=Path)
     check.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
+    check.add_argument("--pixel", action="store_true", help="read the Android bundle.json format")
+    check.add_argument("--truth", type=Path, help="independent ground-truth JSON file")
+    corpus = sub.add_parser("corpus", help="check all labeled cases in a corpus manifest")
+    corpus.add_argument("manifest", type=Path)
+    translate = sub.add_parser("translate", help="write one native iOS or Pixel bundle as a canonical bundle")
+    translate.add_argument("source", type=Path, help="iOS sidecar JSON file or Pixel bundle directory")
+    translate.add_argument("--out", type=Path, required=True, help="new destination directory; existing paths are refused")
+    review = sub.add_parser("review", help="check every bundle under a directory and rank failure modes")
+    review.add_argument("root", type=Path)
+    review.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
+    review.add_argument("--only-fail", action="store_true", help="list only scans that failed")
     pull = sub.add_parser("pull-pixel", help="check adb and thermal state, then pull Pixel debug data without deleting it")
     pull.add_argument("destination", nargs="?", help="new local destination directory; existing paths are refused")
     pull.add_argument("--serial", help="adb device serial when more than one device is connected")
@@ -1249,12 +1750,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
-            report = validate_bundle(args.bundle.expanduser())
+            report = validate_bundle(args.bundle.expanduser(), args.pixel, args.truth)
             if args.as_json:
                 print(json.dumps(report_json(report), indent=2, sort_keys=True))
             else:
                 print(render_report(report))
             return 0 if not report.errors else 1
+        if args.command == "corpus":
+            result = check_corpus(args.manifest.expanduser())
+            print(json.dumps(result, indent=2))
+            return 0 if result["ok"] else 1
+        if args.command == "translate":
+            out = translate_native(args.source.expanduser(), args.out.expanduser())
+            print(f"scanlab: wrote {out}\nNext: scanlab check {out}")
+            return 0
+        if args.command == "review":
+            result = review_corpus(args.root.expanduser())
+            if args.as_json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print(render_review(result, args.only_fail))
+            return 0 if result["ok"] else 1
         if args.command == "pull-pixel":
             return pull_pixel(args)
         parser.error(f"unknown command {args.command}")

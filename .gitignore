@@ -12,3 +12,4 @@ android/*/build/
 Videos/
 android/vialcore/bin/
 .vscode/
+scripts/__pycache__/

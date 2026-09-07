@@ -10,6 +10,10 @@ Run the same command after every Pixel or iPhone scan:
 ./scripts/scanlab check artifacts/pixel-20260903T120000Z
 ```
 
+For a tray of scans rather than one, use `review`, which reads every bundle
+under a directory in whatever format it arrived and ranks what broke. See
+"Batch review" below.
+
 The command prints a concise report and exits `0` only when the bundle is
 structurally valid and its expected values agree with the result. It exits `1`
 for missing schema, missing ground truth, invalid trace data, incomplete
@@ -65,7 +69,8 @@ producing a partial report. The trace and observations artifacts are files;
 
 The phone writer must export this canonical shape for `scanlab check` to read
 it. Native iOS or Android JSON files are not interchangeable with this
-contract unless they are translated while being copied off the phone.
+contract until they are translated; `scanlab translate` does that, and
+"Translating phone output" below describes what it maps.
 
 The bundle directory must contain:
 
@@ -184,13 +189,88 @@ cannot be silently guessed. The `original` value must also agree with the
 machine value in `actual`, so a review record cannot hide which value the
 scanner produced.
 
-## Existing sidecars and tapes
+## Translating phone output
 
-The current iOS sidecar contains only the clip name, note, and parsed expectation.
-The current Android sidecar contains a richer result and capture record, but
-neither sidecar is a `scanlab.bundle`: neither has the versioned summary plus
-per-frame trace. They remain useful evidence and should be copied into a new
-bundle as supporting artifacts once the phone writer emits the v1 fields.
+Both apps write their own native shape, each with a full per-frame trace:
+
+- iOS: one JSON file per kept clip, schema `vial-scanner.scan-debug`, written
+  by `Store.writeClipSidecar` next to the clip.
+- Android: one directory per scan holding `bundle.json`, format
+  `org.lji.vialscanner.debug`, under the app's external media area.
+
+Neither is a `scanlab.bundle`, so translate first:
+
+```bash
+./scripts/scanlab translate artifacts/ios/scan-0001.json --out /tmp/bundle
+./scripts/scanlab translate artifacts/pixel/scan-0007  --out /tmp/bundle
+./scripts/scanlab check /tmp/bundle
+```
+
+`translate` refuses an existing destination and never writes to the source.
+Two translation details matter:
+
+- `capture.framesSeen`, `usableFrames`, and `ocrFrames` are derived from the
+  trace being written, not copied from the phone's engine counters, which count
+  ingested frames rather than captured ones. The phone's own numbers are kept
+  under `config`, so the integrity check compares like with like without losing
+  them.
+- Ground truth comes from the operator's clip note (`cat=`, `lot=`, `clone=`,
+  `expect=`). A blank note produces a bundle with no `groundTruth`, which the
+  checker refuses to judge rather than passing by default.
+
+`check --pixel` still reads the native Android bundle directly and requires
+`--truth` with independently verified values. Use it when the truth must come
+from outside the phone; use `translate` when the operator's note is the truth.
+
+## Batch review
+
+After a tray of scans, review them all in one command:
+
+```bash
+./scripts/scanlab review artifacts/pixel-20260903T120000Z
+```
+
+`review` walks the directory, dispatches each scan by its schema (canonical
+bundle, native Android directory, or iOS sidecar file), translates the native
+ones into a temporary directory, and runs the same per-bundle checks. It prints
+one row per scan and then ranks the failure modes:
+
+```text
+ScanLab review FAIL: 6 scans (3 correct, 2 wrong_result, 0 unresolved, 0 invalid, 1 unannotated)
+
+  PASS  ios-fixture-known       ios     identify  -           cat=910801 lot=B411234 expect=confident
+  FAIL  ios-fixture-miss        ios     identify  extraction  lot never made it into the result
+  NOTE? ios-fixture-unannotated ios     identify  -
+
+Top failure modes:
+  1x [extraction] field-mismatch
+  1x [extraction] scanner-miss
+```
+
+The layer column names the first failing layer, so the tally says which layer
+to fix first instead of leaving it to be inferred from thirty separate reports.
+`--only-fail` hides passing scans and `--json` emits the same result with per
+scan issues and a ranked `failureModes` array.
+
+`NOTE?` rows are scans with no expectation in the note. They are listed so a
+forgotten annotation is visible, but they do not count as failures and do not
+affect the exit code. `review` exits `1` when any annotated scan is
+`wrong_result`, `unresolved`, or `invalid`.
+
+Two rules follow from the ground-truth contract above:
+
+- A catalogue scan needs the fields, not just the verdict. `expect=newVial`
+  alone reports a ground-truth error, because `new_vial` truth must name the
+  fields that should have been captured. Write
+  `cat=910801 lot=B411234 expect=newVial`.
+- A known-vial note needs `cat=` (or an AbNo); `lot=` alone cannot identify
+  what should have matched.
+
+`review` is the loose, note-driven loop. `corpus` remains the strict one: it
+takes a manifest with an external truth file per case and development/holdout
+splits, and is what timing and accuracy claims should come from.
+
+## Tapes
 
 The optional `observations.tape` parser understands the existing Swift format:
 `F`, `T`, `B`, and terminal `R` records. It checks that the tape has evidence,
