@@ -283,6 +283,24 @@ class ScanLabTranslateTests(unittest.TestCase):
             check = self.run_scanlab("check", str(out))
             self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
 
+    def test_pixel_bundle_translation_keeps_packaged_video(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            source = Path(directory) / "pixel"
+            shutil.copytree(FIXTURES / "pixel-native", source)
+            video = b"fake-mp4-for-copy-test"
+            (source / "scan.mp4").write_bytes(video)
+            bundle_path = source / "bundle.json"
+            bundle = json.loads(bundle_path.read_text())
+            bundle["artifacts"] = {"video": "scan.mp4"}
+            bundle_path.write_text(json.dumps(bundle))
+
+            out = Path(directory) / "translated"
+            result = self.run_scanlab("translate", str(source), "--out", str(out))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            summary = json.loads((out / "summary.json").read_text())
+            self.assertEqual(summary["artifacts"]["video"], "scan.mp4")
+            self.assertEqual((out / "scan.mp4").read_bytes(), video)
+
     def test_native_pixel_check_still_reads_the_phone_format(self) -> None:
         """The native reader and the translator share one frame-event builder."""
         with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
@@ -355,6 +373,26 @@ class ScanLabReviewTests(unittest.TestCase):
         self.assertIn("NOTE?", result.stdout)
         self.assertIn("1 unannotated", result.stdout)
         self.assertIn("[extraction] field-mismatch", result.stdout)
+
+    def test_a_prose_note_is_reported_not_filed_as_unannotated(self) -> None:
+        """The operator writes English, not the note DSL, and still said something."""
+        with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:
+            root = Path(directory) / "tray"
+            root.mkdir()
+            shutil.copytree(FIXTURES / "pixel-reported", root / "pixel-reported")
+            result = self.run_review(root, "--json")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["counts"]["reported"], 1)
+            self.assertEqual(payload["counts"]["unannotated"], 0)
+            self.assertEqual(payload["scans"][0]["outcome"], "reported")
+            rendered = self.run_review(root)
+        self.assertIn("NOTE!", rendered.stdout)
+        self.assertIn("1 reported", rendered.stdout)
+        # The complaint is the whole point of the row, so print it in full.
+        self.assertIn("it gave up way too soon and should have gotten concentration",
+                      rendered.stdout)
 
     def test_review_names_the_failing_layer_not_a_warning(self) -> None:
         with tempfile.TemporaryDirectory(prefix="scanlab-test-") as directory:

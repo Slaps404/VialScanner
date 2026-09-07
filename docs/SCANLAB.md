@@ -252,11 +252,15 @@ to fix first instead of leaving it to be inferred from thirty separate reports.
 `--only-fail` hides passing scans and `--json` emits the same result with per
 scan issues and a ranked `failureModes` array.
 
-Two row kinds are listed but never counted as failures, because neither is a
-scanner result:
+Three row kinds are listed but never counted as failures, because none of them
+is a checkable scanner result:
 
-- `NOTE?` is a scan with no expectation in the note, so there is nothing to
-  judge it against. Listed so a forgotten annotation stays visible.
+- `NOTE!` is a scan whose note says something the DSL cannot read, which is
+  what an operator writing "ended before full rotation" produces. It is a real
+  complaint with no checkable expectation, so the note is printed in full and
+  read first. Filing these as un-annotated buries the only content they have.
+- `NOTE?` is a scan with no note at all, so there is nothing to judge it
+  against. Listed so a forgotten annotation stays visible.
 - `SKIP` is a capture that never finished: an aborted scan, or one that
   recorded no frames. A tray pulled off a phone normally contains a few.
 

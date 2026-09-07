@@ -1484,7 +1484,7 @@ def is_ios_sidecar(path: Path) -> bool:
     return isinstance(document, dict) and document.get("schema") == IOS_SCHEMA
 
 
-def translate_ios(document: Mapping[str, Any], base: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[Path]]:
+def translate_ios(document: Mapping[str, Any], base: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[Path], Path | None]:
     if document.get("schemaVersion") != 1:
         raise ScanLabError(f"unsupported {IOS_SCHEMA} schemaVersion {document.get('schemaVersion')!r}")
     summary = document.get("summary")
@@ -1523,10 +1523,22 @@ def translate_ios(document: Mapping[str, Any], base: Path) -> tuple[dict[str, An
     if truth is not None:
         out["groundTruth"] = truth
     images = [base / name for name in accuracy.get("imageFiles") or [] if isinstance(name, str)]
-    return out, events, [p for p in images if p.is_file()]
+    clip = document.get("clip")
+    video = native_artifact_path(base, clip, "video") if isinstance(clip, str) and (base / clip).is_file() else None
+    return out, events, [p for p in images if p.is_file()], video
 
 
-def translate_pixel(document: Mapping[str, Any], base: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[Path]]:
+def native_artifact_path(base: Path, value: str, name: str) -> Path:
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ScanLabError(f"native {name} artifact must be a safe relative path")
+    candidate = base / relative
+    if not candidate.is_file():
+        raise ScanLabError(f"native {name} artifact is missing: {value}")
+    return candidate
+
+
+def translate_pixel(document: Mapping[str, Any], base: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[Path], Path | None]:
     if document.get("format") != PIXEL_FORMAT or document.get("schemaVersion") != 1:
         raise ScanLabError(f"unsupported {PIXEL_FORMAT} format/schemaVersion")
     frames = document.get("frames")
@@ -1572,7 +1584,10 @@ def translate_pixel(document: Mapping[str, Any], base: Path) -> tuple[dict[str, 
         out["capture"]["status"] = scan.get("status")
     if truth is not None:
         out["groundTruth"] = truth
-    return out, events, images
+    native_artifacts = document.get("artifacts") if isinstance(document.get("artifacts"), Mapping) else {}
+    video_value = native_artifacts.get("video")
+    video = native_artifact_path(base, video_value, "video") if isinstance(video_value, str) else None
+    return out, events, images, video
 
 
 def read_native(path: Path) -> tuple[str, dict[str, Any], Path]:
@@ -1602,7 +1617,7 @@ def read_native(path: Path) -> tuple[str, dict[str, Any], Path]:
 def translate_native(path: Path, out: Path) -> Path:
     """Write one native phone bundle as a canonical bundle directory."""
     kind, document, base = read_native(path)
-    summary, events, images = (translate_ios if kind == "ios" else translate_pixel)(document, base)
+    summary, events, images, video = (translate_ios if kind == "ios" else translate_pixel)(document, base)
     if out.exists():
         raise ScanLabError(f"destination already exists: {out}")
     out.mkdir(parents=True)
@@ -1611,6 +1626,9 @@ def translate_native(path: Path, out: Path) -> Path:
         for image in images:
             shutil.copy2(image, out / "images" / image.name)
         summary["artifacts"]["images"] = "images"
+    if video is not None:
+        shutil.copy2(video, out / "scan.mp4")
+        summary["artifacts"]["video"] = "scan.mp4"
     (out / "trace.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
     (out / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     return out
@@ -1618,11 +1636,13 @@ def translate_native(path: Path, out: Path) -> Path:
 
 # --- Batch review -------------------------------------------------------------
 
-REVIEW_OUTCOMES = ("correct", "wrong_result", "unresolved", "invalid", "unannotated", "cancelled")
+REVIEW_OUTCOMES = ("correct", "wrong_result", "unresolved", "invalid",
+                   "reported", "unannotated", "cancelled")
 
 # Outcomes that are not a scanner failure: nothing to judge, so they neither
-# rank as a failure mode nor set the exit code.
-REVIEW_NOT_FAILURES = {"correct", "unannotated", "cancelled"}
+# rank as a failure mode nor set the exit code. `reported` is here because a
+# complaint in English is not checkable, not because it is not a real miss.
+REVIEW_NOT_FAILURES = {"correct", "reported", "unannotated", "cancelled"}
 
 
 def native_incomplete(document: Mapping[str, Any]) -> str | None:
@@ -1685,18 +1705,21 @@ def review_row(kind: str, path: Path, work: Path, index: int) -> dict[str, Any]:
     payload = report_json(report)
     summary = payload["summary"] if isinstance(payload.get("summary"), Mapping) else {}
     annotated = isinstance(summary.get("groundTruth"), Mapping)
-    outcome = payload["outcome"] if annotated else "unannotated"
-    # The first FAIL is the layer to fix; a WARN alone is not what broke the scan.
-    layer = next((name for name, state in report.layers.items() if state == "FAIL"), None)
     note = summary.get("note")
     if not isinstance(note, str):
         truth = summary.get("groundTruth")
         note = truth.get("note", "") if isinstance(truth, Mapping) else ""
+    # A note the DSL could not read is still the operator telling us the scan
+    # was wrong. Filing it as un-annotated buries the one thing worth reading.
+    outcome = payload["outcome"] if annotated else ("reported" if note.strip() else "unannotated")
+    unjudged = outcome in ("reported", "unannotated")
+    # The first FAIL is the layer to fix; a WARN alone is not what broke the scan.
+    layer = next((name for name, state in report.layers.items() if state == "FAIL"), None)
     return {"path": str(path), "bundleId": summary.get("bundleId") or path.name,
             "platform": summary.get("platform", "unknown"), "goal": summary.get("goal", "unknown"),
-            "outcome": outcome, "layer": None if outcome == "unannotated" else layer,
+            "outcome": outcome, "layer": None if unjudged else layer,
             "note": note, "mismatches": payload["mismatches"],
-            "issues": [] if outcome == "unannotated" else payload["issues"]}
+            "issues": [] if unjudged else payload["issues"]}
 
 
 def review_corpus(root: Path) -> dict[str, Any]:
@@ -1725,8 +1748,9 @@ def render_review(result: Mapping[str, Any], only_fail: bool = False) -> str:
     lines = [f"ScanLab review {'PASS' if result['ok'] else 'FAIL'}: {len(result['scans'])} scans "
              f"({counts['correct']} correct, {counts['wrong_result']} wrong_result, "
              f"{counts['unresolved']} unresolved, {counts['invalid']} invalid, "
-             f"{counts['unannotated']} unannotated, {counts['cancelled']} cancelled)", ""]
-    labels = {"correct": "PASS", "unannotated": "NOTE?", "cancelled": "SKIP"}
+             f"{counts['reported']} reported, {counts['unannotated']} unannotated, "
+             f"{counts['cancelled']} cancelled)", ""]
+    labels = {"correct": "PASS", "reported": "NOTE!", "unannotated": "NOTE?", "cancelled": "SKIP"}
     shown = 0
     for scan in result["scans"]:
         if only_fail and scan["outcome"] in REVIEW_NOT_FAILURES:
@@ -1735,12 +1759,18 @@ def render_review(result: Mapping[str, Any], only_fail: bool = False) -> str:
         note = scan["note"].strip().replace("\n", " ")
         lines.append(f"  {labels.get(scan['outcome'], 'FAIL'):5} {scan['bundleId'][:28]:28} "
                      f"{scan['platform']:8}{scan['goal']:10}{scan['layer'] or '-':12}{note[:60]}")
+        # A prose complaint is the only content of its row, so never clip it.
+        if scan["outcome"] == "reported" and len(note) > 60:
+            lines.append(f"        {note}")
     if shown == 0:
         lines.append("  (nothing failing)")
     if result["failureModes"]:
         lines.extend(["", "Top failure modes:"])
         for mode in result["failureModes"]:
             lines.append(f"  {mode['count']}x [{mode['layer']}] {mode['code']}")
+    if counts["reported"]:
+        lines.extend(["", "NOTE! scans carry a complaint with no checkable expectation. Read those "
+                      "notes first, then add cat=/lot=/expect= so a rerun can judge them."])
     if counts["unannotated"]:
         lines.extend(["", "NOTE? scans carry no expectation. Add cat=/lot=/expect= in the app's "
                       "clip note field so they can be judged."])

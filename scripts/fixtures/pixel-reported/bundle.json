@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "format": "org.lji.vialscanner.debug",
+  "scan": {
+    "id": "pixel-fixture-reported",
+    "status": "finished",
+    "startedAtEpochMs": 1772539800000,
+    "endedAtEpochMs": 1772539800840,
+    "startedAt": "2026-09-03T12:10:00Z",
+    "endedAt": "2026-09-03T12:10:00.840Z"
+  },
+  "build": {
+    "applicationID": "org.lji.vialscanner",
+    "appVersion": "1.0",
+    "versionCode": 1,
+    "buildID": "fixture"
+  },
+  "catalog": {
+    "sha256": "abc123",
+    "definitions": 12,
+    "inventoryItems": 30
+  },
+  "config": {
+    "mode": "performance",
+    "maxOCRFrames": 24,
+    "minScanSeconds": 0.6,
+    "maxScanSeconds": 8.0,
+    "minDistinctViews": 2,
+    "roiInset": 0.15,
+    "barcodeEveryNthFrame": 3,
+    "minOCRInterval": 0.12,
+    "sharpnessRatio": 0.6,
+    "sharpnessWindow": 8,
+    "ocrLongEdge": 1280
+  },
+  "device": {
+    "manufacturer": "Google",
+    "model": "Pixel 8",
+    "device": "shiba",
+    "androidRelease": "16",
+    "apiLevel": 36
+  },
+  "thermal": {
+    "startStatus": 0,
+    "startLabel": "none",
+    "endStatus": 0,
+    "endLabel": "none"
+  },
+  "optics": {},
+  "groundTruth": {
+    "note": "it gave up way too soon and should have gotten concentration"
+  },
+  "result": {
+    "verdict": "confident",
+    "evidenceLevel": "full",
+    "readNothing": false,
+    "definitionName": "Fixture antibody",
+    "abNo": "42",
+    "catalog": "910801",
+    "lot": "B411234",
+    "score": 0.91,
+    "margin": 0.4,
+    "reasons": [
+      "label match"
+    ],
+    "fields": {
+      "catalog": "910801",
+      "lot": "B411234"
+    },
+    "framesUsed": 2,
+    "lotNotOnRecord": false
+  },
+  "frames": [
+    {
+      "index": 0,
+      "timestampSeconds": 0.0,
+      "elapsedSeconds": 0.03,
+      "image": {
+        "width": 1920,
+        "height": 1080
+      },
+      "rotationDegrees": 90,
+      "sharpnessEvaluated": true,
+      "barcodeAttempted": true,
+      "barcodeMs": 6,
+      "barcodes": [],
+      "ocrAttempted": true,
+      "ocrMs": 30,
+      "observations": [
+        {
+          "text": "CAT. NO. 910801",
+          "confidence": 0.94
+        }
+      ],
+      "ingestMs": 4,
+      "engineState": "scanning"
+    },
+    {
+      "index": 1,
+      "timestampSeconds": 0.5,
+      "elapsedSeconds": 0.53,
+      "image": {
+        "width": 1920,
+        "height": 1080
+      },
+      "rotationDegrees": 90,
+      "sharpnessEvaluated": true,
+      "barcodeAttempted": false,
+      "barcodes": [],
+      "ocrAttempted": true,
+      "ocrMs": 28,
+      "observations": [
+        {
+          "text": "LOT B411234",
+          "confidence": 0.9
+        }
+      ],
+      "ingestMs": 4,
+      "engineState": "scanning"
+    },
+    {
+      "index": 2,
+      "timestampSeconds": 0.8,
+      "elapsedSeconds": 0.84,
+      "image": {
+        "width": 1920,
+        "height": 1080
+      },
+      "rotationDegrees": 90,
+      "sharpnessEvaluated": true,
+      "barcodeAttempted": false,
+      "barcodes": [],
+      "ocrAttempted": false,
+      "observations": [],
+      "ingestMs": 3,
+      "engineState": "scanning",
+      "skipReason": "blurry"
+    }
+  ]
+}
