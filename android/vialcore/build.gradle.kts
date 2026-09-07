@@ -20,3 +20,28 @@ sourceSets {
     main { kotlin.srcDir("src/main/kotlin") }
     test { kotlin.srcDir("src/test/kotlin") }
 }
+
+// Plain-main tests must run during check; compiling them alone tests nothing.
+tasks.register<JavaExec>("identitySafety") {
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("org.lji.vialcore.IdentitySafetyTest")
+}
+tasks.register<JavaExec>("scanPolicy") {
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("org.lji.vialcore.ScanEnginePolicyTest")
+}
+tasks.register<JavaExec>("expiryKeyword") {
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("org.lji.vialcore.ExpiryKeywordTest")
+}
+tasks.named("check") { dependsOn("identitySafety", "scanPolicy", "expiryKeyword") }
+tasks.register<JavaExec>("replayParity") {
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("org.lji.vialcore.ReplayParityKt")
+    args(providers.gradleProperty("tapes").getOrElse("/tmp/vial-tapes"),
+        rootProject.file("../Resources/definitions.csv"), rootProject.file("../Resources/inventory.csv"))
+}

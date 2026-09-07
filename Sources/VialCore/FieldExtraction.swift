@@ -95,8 +95,14 @@ private let rules: [Rule] = [
     .init(.volume,  #"(?:Vol|Size)\s*[:.]?\s*([0-9]+(?:\.[0-9]+)?\s*(?:m|u|µ|μ)?[lL])"#),
     // Cataloguing a vial the catalog has never seen needs the whole label, not
     // just the identifiers - see README "Two goals, opposite stopping rules".
-    .init(.expiry, #"EXP(?:IR(?:Y|ES|ATION))?\.?\s*(?:DATE)?\s*[:.]?\s*([0-9]{4}[-/. ][0-9]{1,2}[-/. ][0-9]{1,2}|[0-9]{1,2}[-/. ][0-9]{1,2}[-/. ][0-9]{2,4}|[0-9]{1,2}[-/ ][0-9]{4}|[0-9]{4}[-/ ][0-9]{1,2})"#),
-    .init(.storage, #"STOR(?:E|AGE)\s*(?:AT)?\s*[:.]?\s*(-?[0-9]{1,3}\s*°?\s*C(?:\s*(?:-|to|TO)\s*-?[0-9]{1,3}\s*°?\s*C)?)"#),
+    // Separators are `-`, `/` or `.`, never a bare space: across the sample
+    // labels a space only ever appeared between a date and the token after it,
+    // where it let `2022-08 10` read as a three-part date.
+    // `Best before` / `Best by` / `Use by` are what several vendors print
+    // instead of `Exp.`; the value still has to be date-shaped, so widening the
+    // keyword costs precision nothing.
+    .init(.expiry, #"\b(?:EXP(?:IR(?:Y|ES|ATION))?|BEST(?:\s*(?:BEFORE|BY))?|USE\s*(?:BY|BEFORE))\.?\s*(?:DATE)?\s*[:.]?\s*([0-9]{4}[-/.][0-9]{1,2}[-/.][0-9]{1,2}|[0-9]{1,2}[-/.][0-9]{1,2}[-/.][0-9]{2,4}|[0-9]{1,2}[-/.][0-9]{4}|[0-9]{4}[-/.][0-9]{1,2})"#),
+    .init(.storage, #"STOR(?:E|AGE)\s*(?:AT)?\s*[:.]?\s*(-?[0-9]{1,3}\s*(?:(?:°?\s*C)?\s*(?:-|to)\s*-?\s*[0-9]{1,3}\s*°?\s*C|°?\s*C))"#),
 ]
 
 /// Fields copied onto the record verbatim rather than folded to an upper-case
@@ -166,6 +172,10 @@ private func matchesWhole(_ re: NSRegularExpression, _ s: String) -> Bool {
 
 private func isPlausible(_ field: LabelField, _ value: String) -> Bool {
     let k = normKey(value)
+    if field == .concentration {
+        let prefix = value.prefix { $0.isNumber || $0 == "." }
+        guard let amount = Double(prefix), amount > 0, amount <= 100 else { return false }
+    }
     // Measure the value as printed, not as normalised. `normKey` strips the
     // hyphen, which turns Leinco's `I-118` into four characters and fails it on
     // a floor that exists to reject truncation artefacts — but the hyphen is
@@ -283,6 +293,30 @@ private struct Shape {
 }
 
 private let shapes: [Shape] = [
+    // Descriptive values can survive while their short keyword falls around
+    // the label curve. Units and ISO dates keep these fallbacks narrow.
+    .init(.concentration,
+          #"(?<![0-9])[0-9]+(?:\.[0-9]+)?\s*(?:[mMuUµμ][gG])\s*/\s*[mM]?[lL]\b"#,
+          weight: 0.49),
+    .init(.volume,
+          #"(?<![0-9])[0-9]+(?:\.[0-9]+)?\s*(?:[mMuUµμ][lL])\b"#,
+          weight: 0.49),
+    .init(.expiry,
+          #"\b(?:19|20)[0-9]{2}[-/.][0-9]{1,2}[-/.][0-9]{1,2}\b"#,
+          weight: 0.49),
+    .init(.expiry,
+          #":\s*(?:0?[1-9]|1[0-2])[-/.](?:19|20)[0-9]{2}\b"#,
+          weight: 0.49,
+          normalize: { $0.dropFirst().trimmingCharacters(in: .whitespaces) }),
+    .init(.storage,
+          #"(?<![0-9])(?:-\s*)?[0-9]{1,3}\s*(?:°?\s*C)?\s*(?:-|to)\s*(?:-\s*)?[0-9]{1,3}\s*°?\s*C\b"#,
+          weight: 0.49,
+          normalize: { $0.replacingOccurrences(of: #"-\s+"#, with: "-", options: .regularExpression) }),
+    .init(.storage,
+          #"(?<![0-9])(?:-\s*)?[0-9]{1,3}\s*°?\s*C\b"#,
+          weight: 0.49,
+          normalize: { $0.replacingOccurrences(of: #"-\s+"#, with: "-", options: .regularExpression) }),
+
     // eBioscience / Invitrogen / Affymetrix: `14-9948-82`. Unmistakable, and
     // not confusable with a date — those are `2027-05-31`, four digits first.
     .init(.catalog, #"\b\d{2}-\d{4}-\d{2}\b"#, weight: 0.75),
@@ -384,8 +418,13 @@ func extractFields(from observations: [TextObservation]) -> [LabelField: FieldRe
         guard let m = rule.pattern.firstMatch(in: joined, options: [], range: full),
               m.numberOfRanges > rule.group,
               m.range(at: rule.group).location != NSNotFound else { continue }
+        // A storage temperature's leading `-` is its meaning, not stray
+        // punctuation: trimming it turned `-20C` into `20C`, a freezer into a
+        // benchtop. Identifiers keep the old trim, where a dangling hyphen is
+        // an OCR artefact.
+        let trimSet = rule.field == .storage ? " .,;:" : " .,;:-"
         let v = ns.substring(with: m.range(at: rule.group))
-            .trimmingCharacters(in: CharacterSet(charactersIn: " .,;:-"))
+            .trimmingCharacters(in: CharacterSet(charactersIn: trimSet))
         if rule.field == .catalog, numericPartial == nil,
            !isPlausible(.catalog, v), matchesWhole(numericPartialCatalog, v) {
             numericPartial = v
@@ -426,12 +465,18 @@ func extractFields(from observations: [TextObservation]) -> [LabelField: FieldRe
     let vendor = out[.vendor]?.value
     for shape in shapes where out[shape.field] == nil {
         if let need = shape.vendor, need != vendor { continue }
-        guard let m = shape.pattern.firstMatch(in: joined, options: [], range: full) else { continue }
-        let raw = ns.substring(with: m.range)
-        let v = shape.normalize(raw).uppercased()
-        guard isPlausible(shape.field, v), !looksLikeYearMonth(v), !looksLikeDate(normKey(v))
-        else { continue }
-        out[shape.field] = FieldReading(value: v, weight: shape.weight)
+        for line in lines {
+            let lineNS = line as NSString
+            let lineRange = NSRange(location: 0, length: lineNS.length)
+            guard let m = shape.pattern.firstMatch(in: line, options: [], range: lineRange) else { continue }
+            let value = shape.normalize(lineNS.substring(with: m.range))
+            guard isPlausible(shape.field, value) else { continue }
+            if shape.field == .catalog,
+               looksLikeYearMonth(value) || looksLikeDate(normKey(value)) { continue }
+            let output = descriptiveFields.contains(shape.field) ? value : value.uppercased()
+            out[shape.field] = FieldReading(value: output, weight: shape.weight)
+            break
+        }
     }
 
     // 4. Last resort only: a fragment must never displace a fuller read that the

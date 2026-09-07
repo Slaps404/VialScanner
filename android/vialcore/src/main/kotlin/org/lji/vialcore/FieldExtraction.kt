@@ -122,14 +122,18 @@ private val rules: List<Rule> = listOf(
     // just the identifiers - see README "Two goals, opposite stopping rules".
     Rule(
         LabelField.EXPIRY,
-        """EXP(?:IR(?:Y|ES|ATION))?\.?\s*(?:DATE)?\s*[:.]?\s*""" +
-            """([0-9]{4}[-/. ][0-9]{1,2}[-/. ][0-9]{1,2}|[0-9]{1,2}[-/. ][0-9]{1,2}[-/. ][0-9]{2,4}|""" +
-            """[0-9]{1,2}[-/ ][0-9]{4}|[0-9]{4}[-/ ][0-9]{1,2})"""
+        // `Best before` / `Best by` / `Use by` are what several vendors print
+        // instead of `Exp.`; the value still has to be date-shaped.
+        """\b(?:EXP(?:IR(?:Y|ES|ATION))?|BEST(?:\s*(?:BEFORE|BY))?|USE\s*(?:BY|BEFORE))""" +
+            """\.?\s*(?:DATE)?\s*[:.]?\s*""" +
+            // Separators are `-`, `/` or `.`, never a bare space.
+            """([0-9]{4}[-/.][0-9]{1,2}[-/.][0-9]{1,2}|[0-9]{1,2}[-/.][0-9]{1,2}[-/.][0-9]{2,4}|""" +
+            """[0-9]{1,2}[-/.][0-9]{4}|[0-9]{4}[-/.][0-9]{1,2})"""
     ),
     Rule(
         LabelField.STORAGE,
         """STOR(?:E|AGE)\s*(?:AT)?\s*[:.]?\s*""" +
-            """(-?[0-9]{1,3}\s*°?\s*C(?:\s*(?:-|to|TO)\s*-?[0-9]{1,3}\s*°?\s*C)?)"""
+            """(-?[0-9]{1,3}\s*(?:(?:°?\s*C)?\s*(?:-|to)\s*-?\s*[0-9]{1,3}\s*°?\s*C|°?\s*C))"""
     ),
 )
 
@@ -196,6 +200,10 @@ private val numericPartialCatalog = urx("""^[0-9]{4}$""")
 
 private fun isPlausible(field: LabelField, value: String): Boolean {
     val k = normKey(value)
+    if (field == LabelField.CONCENTRATION) {
+        val amount = value.takeWhile { it.isDigit() || it == '.' }.toDoubleOrNull()
+        if (amount == null || amount <= 0.0 || amount > 100.0) return false
+    }
     // Measure the value as printed, not as normalised. normKey strips the hyphen,
     // which turns Leinco's `I-118` into four characters and fails it on a floor
     // that exists to reject truncation artefacts - but the hyphen is structure
@@ -315,6 +323,39 @@ private class Shape(
 }
 
 private val shapes: List<Shape> = listOf(
+    // Descriptive values can survive while their short keyword falls around
+    // the label curve. Units and ISO dates are specific enough to recover
+    // without guessing from bare digits.
+    Shape(
+        LabelField.CONCENTRATION,
+        """(?<![0-9])[0-9]+(?:\.[0-9]+)?\s*(?:[mMuUµμ][gG])\s*/\s*[mM]?[lL]\b""",
+        0.49,
+    ),
+    Shape(
+        LabelField.VOLUME,
+        """(?<![0-9])[0-9]+(?:\.[0-9]+)?\s*(?:[mMuUµμ][lL])\b""",
+        0.49,
+    ),
+    Shape(LabelField.EXPIRY, """\b(?:19|20)[0-9]{2}[-/.][0-9]{1,2}[-/.][0-9]{1,2}\b""", 0.49),
+    Shape(
+        LabelField.EXPIRY,
+        """:\s*(?:0?[1-9]|1[0-2])[-/.](?:19|20)[0-9]{2}\b""",
+        0.49,
+        normalize = { it.drop(1).trim() },
+    ),
+    Shape(
+        LabelField.STORAGE,
+        """(?<![0-9])(?:-\s*)?[0-9]{1,3}\s*(?:°?\s*C)?\s*(?:-|to)\s*(?:-\s*)?[0-9]{1,3}\s*°?\s*C\b""",
+        0.49,
+        normalize = { it.replace(Regex("""-\s+"""), "-") },
+    ),
+    Shape(
+        LabelField.STORAGE,
+        """(?<![0-9])(?:-\s*)?[0-9]{1,3}\s*°?\s*C\b""",
+        0.49,
+        normalize = { it.replace(Regex("""-\s+"""), "-") },
+    ),
+
     // eBioscience / Invitrogen / Affymetrix: `14-9948-82`. Unmistakable, and not
     // confusable with a date - those are `2027-05-31`, four digits first.
     Shape(LabelField.CATALOG, """\b\d{2}-\d{4}-\d{2}\b""", 0.75),
@@ -415,7 +456,11 @@ fun extractFields(observations: List<TextObservation>): Map<LabelField, FieldRea
         if (out.containsKey(rule.field)) continue
         val m = rule.regex.find(joined) ?: continue
         val g = m.groups[rule.group] ?: continue
-        val v = g.value.trim(' ', '.', ',', ';', ':', '-')
+        // A storage temperature's leading `-` is its meaning, not stray
+        // punctuation: trimming it turned `-20C` into `20C`, a freezer into a
+        // benchtop. Identifiers keep the old trim.
+        val v = if (rule.field == LabelField.STORAGE) g.value.trim(' ', '.', ',', ';', ':')
+                else g.value.trim(' ', '.', ',', ';', ':', '-')
         if (rule.field == LabelField.CATALOG && numericPartial == null &&
             !isPlausible(LabelField.CATALOG, v) && numericPartialCatalog.matches(v)
         ) {
@@ -461,10 +506,17 @@ fun extractFields(observations: List<TextObservation>): Map<LabelField, FieldRea
     for (shape in shapes) {
         if (out.containsKey(shape.field)) continue
         if (shape.vendor != null && shape.vendor != vendor) continue
-        val m = shape.regex.find(joined) ?: continue
-        val v = shape.normalize(m.value).uppercase()
-        if (!isPlausible(shape.field, v) || looksLikeYearMonth(v) || looksLikeDate(normKey(v))) continue
-        out[shape.field] = FieldReading(v, shape.weight)
+        for (observation in observations) {
+            val m = shape.regex.find(observation.text) ?: continue
+            val raw = shape.normalize(m.value)
+            if (!isPlausible(shape.field, raw) ||
+                (shape.field == LabelField.CATALOG &&
+                    (looksLikeYearMonth(raw) || looksLikeDate(normKey(raw))))
+            ) continue
+            val value = if (shape.field in descriptiveFields) raw else raw.uppercase()
+            out[shape.field] = FieldReading(value, shape.weight)
+            break
+        }
     }
 
     // 4. Last resort only: a fragment must never displace a fuller read that the
