@@ -85,7 +85,7 @@ struct ResultCard: View {
                     .foregroundStyle(tint)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(result.readNothing ? "Nothing read" : result.verdict.headline)
+                Text(result.readNothing ? "Nothing read" : result.isHit && result.vial == nil ? "Product identified" : result.verdict == .notFound ? "No match" : result.verdict.headline)
                     .font(Theme.title).foregroundStyle(Theme.text)
                 Text(result.readNothing
                      ? "No text or barcode was recognised"
@@ -266,6 +266,9 @@ struct ResultCard: View {
 
     @ViewBuilder
     private var notices: some View {
+        if result.vial != nil && !result.canAutoConfirm {
+            Notice(text: "Check the label before confirming this proposed match.", tint: Theme.warn)
+        }
         if result.lotNotOnRecord {
             Notice(text: "The lot read from this label matches no vial on record for this antibody. "
                    + "Treat it as a new lot rather than one of the vials below.",

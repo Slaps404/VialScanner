@@ -159,8 +159,8 @@ fun DefinitionSheet(
         Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
             Text("New antibody", color = Ink.text, fontSize = 20.sp)
             Spacer(Modifier.height(8.dp))
-            Field("Name", d.name) { d = d.copy(name = it) }
-            Field("Target", d.target) { d = d.copy(target = it) }
+            Field("Display name (AntibodyName)", d.name, placeholder = "Target + clone + catalog number") { d = d.copy(name = it) }
+            Field("Target", d.target, placeholder = "e.g. CD4, printed on the label") { d = d.copy(target = it) }
             Field("Clone", d.clone, source = sources["Clone"]) { d = d.copy(clone = it) }
             Field("Host", d.host) { d = d.copy(host = it) }
             Field("Isotype", d.isotype, source = sources["Isotype"]) { d = d.copy(isotype = it) }
